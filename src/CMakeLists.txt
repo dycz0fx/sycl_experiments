@@ -1,5 +1,4 @@
 
-add_compile_options(-Wno-deprecated-declarations)
 link_libraries(pthread)
 
 add_executable(gpu_cpu_atomics gpu_cpu_atomics.cpp)

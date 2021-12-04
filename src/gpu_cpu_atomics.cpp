@@ -21,8 +21,8 @@ int main() {
             size_t i = 0;
             size_t val_prev = 0, val_curr = 0;
             while(i<N) {
-                sycl::ONEAPI::atomic_ref<size_t, sycl::ONEAPI::memory_order::seq_cst, sycl::ONEAPI::memory_scope::system, sycl::access::address_space::global_space> last_atomic(last[0]);
-                int val_curr = last_atomic.load(sycl::ONEAPI::memory_order::seq_cst);
+                sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> last_atomic(last[0]);
+                int val_curr = last_atomic.load(sycl::memory_order::seq_cst);
                 //val_curr = last[0];
                 assert(val_curr >= val_prev);
                 while(val_prev < val_curr) {
@@ -49,8 +49,8 @@ int main() {
             constexpr long D = 10000000;
             //constexpr long D = 0;
             for(int i=0;i<N;i++) {
-                sycl::ONEAPI::atomic_ref<size_t, sycl::ONEAPI::memory_order::seq_cst, sycl::ONEAPI::memory_scope::system, sycl::access::address_space::global_space> last_atomic(last[0]);
-                size_t val = last_atomic.fetch_add(1,sycl::ONEAPI::memory_order::seq_cst);
+                sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> last_atomic(last[0]);
+                size_t val = last_atomic.fetch_add(1,sycl::memory_order::seq_cst);
                 //size_t val = last[0];
                 last[0] = val+1;
 
