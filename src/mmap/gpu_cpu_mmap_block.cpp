@@ -8,6 +8,19 @@
 
 constexpr size_t T = 1;
 
+//https://github.com/torvalds/linux/blob/master/arch/x86/boot/boot.h
+//https://elixir.bootlin.com/linux/latest/source/arch/x86/include/asm/vdso/processor.h
+//https://www.kernel.org/doc/html/latest/process/volatile-considered-harmful.html
+//https://libfbp.blogspot.com/2018/01/c-mellor-crummey-scott-mcs-lock.html
+//https://www.oreilly.com/library/view/linux-device-drivers/0596005903/ch07.html
+
+#define cpu_relax()	asm volatile("rep; nop")
+//#define cpu_relax() asm volatile ("pause")
+
+//Add memory barrier https://stackoverflow.com/questions/31601057/is-there-any-example-that-triple-colon-is-a-valid-syntax-in-c-code
+//#define cpu_relax() asm volatile ("pause":::"memory")
+
+
 int main() {
     sycl::queue Q;
     std::cout<<"selected device : "<<Q.get_device().get_info<sycl::info::device::name>() <<"\n";
@@ -37,9 +50,8 @@ int main() {
     //    h.codeplay_host_task([=]() {
 
             std::cout<<"dev_loc "<<dev_loc[0]<<"\n";
-            size_t temp = dev_loc[0];
-            while(temp == 1) {  temp = dev_loc[0]; }
-            std::cout<<"dev_loc "<<temp<<"\n";
+            while(dev_loc[0] == 1) { cpu_relax(); }
+            std::cout<<"dev_loc "<<dev_loc[0]<<"\n";
             fflush(stdout);
             //sleep(1);
             while(dev_loc[0] == 2);
@@ -57,9 +69,9 @@ int main() {
             //os<<"kernel val: "<<last_device_mem[0]<<" "<<last_device_mem[1]<<"\n";
             sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> last_atomic(last_device_mem[0]);
             last_atomic.store(2);
-            last_atomic.store(3);
-            #if 0
+
             double delay = 0;
+            #if 0
             for(int i=0;i<10;i++) {
                 //last_device_mem[0] = i;
                 //last_atomic++;
@@ -69,9 +81,10 @@ int main() {
                 constexpr long D = 50000000;
                 for(int j=0;j<D;j++) delay+=j;
             }
+            #endif
+            last_atomic.store(3);
             shared_temp[0] = delay;
             //os<<"kernel sum: "<<delay<<"\n";
-            #endif
         });
     });
     e.wait_and_throw();
