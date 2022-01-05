@@ -9,14 +9,16 @@
 #include<CL/sycl/backend/level_zero.hpp>
 #include<sys/mman.h>
 
-constexpr size_t N = 5;
-constexpr size_t T = 1;
-constexpr size_t capacity = 20;
+#define VLT volatile
+
+constexpr size_t N = 32;
+constexpr size_t T = 128;
+constexpr size_t capacity = 64;
 
 struct packet_t {
     int64_t dest; // to be a pointer
     int64_t val;
-    int64_t flag;
+    int64_t flag; // delete. using a separate flag array
 };
 
 struct info_t {
@@ -24,9 +26,13 @@ struct info_t {
     size_t * first;
     packet_t * buff;
     size_t * flag;
+
+    //DEBUG START
+    size_t * tmp_counter;
     size_t * flag_tmp1;
     size_t * flag_tmp2;
     size_t * flag_tmp3;
+    //DEBUG END
 };
 
 #define cpu_relax() asm volatile("rep; nop")
@@ -38,33 +44,47 @@ void oshmem_int64_t_put(int64_t dest, int64_t val, info_t info) {
     sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> last_atomic(info.last[0]);
     size_t index = last_atomic.fetch_add(1);
 
+    //DEBUG START
+    auto idx = sycl::ext::oneapi::experimental::this_nd_item<1>();
+    int g_idx = idx.get_global_id(0);
+    sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> tmp_counter_atomic(info.tmp_counter[g_idx]);
+    tmp_counter_atomic.fetch_add(g_idx);
+    //DEBUG END
+
     //make sure there is space
     //if there is no space, wait until space becomes available
-    //int64_t first_required = index - capacity;
-    //sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> first_atomic(info.first[0]);
+    sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> first_atomic(info.first[0]);
     //while((int64_t)(first_atomic.load()) <= first_required);
+    assert(index >= first_atomic.load());
+    while(index - first_atomic.load() >= capacity) {tmp_counter_atomic++;}
+    tmp_counter_atomic++;
 
     //write data to the buffer
     //sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> buff_atomic(info.buff[index%capacity]);
     //buff_atomic.store(pkt);
     //info.buff[index%capacity] = pkt; //uncached write. can we use atomic write on complex struct? we might have to split this into multiple atomic operations or use a fence
 
-    //int num_parts = sizeof(packet_t)/sizeof(long);
-    //long *buff_ptr = (long*) &(info.buff[index%capacity]);
-    //long *pkt_ptr = (long*) &pkt;
-    //for(int i=0; i<num_parts;i++){
-    //    sycl::ext::oneapi::atomic_ref<long, sycl::memory_order::seq_cst, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> buff_atomic(buff_ptr[i]);
-    //    buff_atomic.store(pkt_ptr[i]);
-    //}
+    //write data in parts for now
+    int num_parts = sizeof(packet_t)/sizeof(long);
+    long *buff_ptr = (long*) &(info.buff[index%capacity]);
+    long *pkt_ptr = (long*) &pkt;
+    for(int i=0; i<num_parts;i++){
+        sycl::ext::oneapi::atomic_ref<long, sycl::memory_order::seq_cst, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> buff_atomic(buff_ptr[i]);
+        buff_atomic.store(pkt_ptr[i]);
+    }
 
     //sycl::ext::oneapi::atomic_ref<int64_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> buff_atomic(info.buff[0].flag);
     //buff_atomic.store(1);
     
+    //set flag to 1 to denote the data is available
     sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> flag_atomic(info.flag[index%capacity]);
     flag_atomic.store(1);
+
+    //DEBUG START
     info.flag_tmp1[index%capacity] = flag_atomic.load();
     info.flag_tmp2[index%capacity] = info.flag[index%capacity];
     info.flag_tmp3[index%capacity] = index%capacity;
+    //DEBUG END
 }
 
 template<typename T>
@@ -89,8 +109,26 @@ int main() {
     std::cout<<"selected device : "<<Q.get_device().get_info<sycl::info::device::name>() <<"\n";
     std::cout<<"device vendor : "<<Q.get_device().get_info<sycl::info::device::vendor>() <<"\n";
 
-    size_t * last = sycl::malloc_device<size_t>(1, Q);
-    size_t * first = sycl::malloc_device<size_t>(1, Q);
+    size_t size = sizeof(size_t)*(1+1) + sizeof(packet_t)*capacity + sizeof(size_t)*capacity + sizeof(size_t)*capacity;
+    size_t size_full = size + sizeof(size_t)*capacity*3;
+    VLT size_t * last = sycl::malloc_device<size_t>(size_full, Q);
+    VLT size_t * first = last+1;
+    packet_t * buff = (packet_t *)(first+1);
+    VLT size_t * flag = (size_t *)(buff + capacity);
+    VLT size_t * tmp_counter =  (size_t *)(flag + capacity);
+    size_t * flag_tmp1 = (size_t*)(tmp_counter + capacity);
+    size_t * flag_tmp2 = flag_tmp1 + capacity;
+    size_t * flag_tmp3 = flag_tmp2 + capacity;
+
+    //size_t * flag_tmp1 = sycl::malloc_host<size_t>(capacity, Q);
+    //size_t * flag_tmp2 = sycl::malloc_host<size_t>(capacity, Q);
+    //size_t * flag_tmp3 = sycl::malloc_host<size_t>(capacity, Q);
+
+    Q.memset((void*)last, 0, size);
+
+    #if 0
+    size_t * last = sycl::malloc_device<size_t>(2, Q);
+    //size_t * first = sycl::malloc_device<size_t>(1, Q);
     packet_t * buff = sycl::malloc_device<packet_t>(capacity, Q);
     size_t * flag =  sycl::malloc_device<size_t>(capacity, Q);
     size_t * flag_tmp1 =  sycl::malloc_shared<size_t>(capacity, Q);
@@ -104,22 +142,24 @@ int main() {
     Q.memset(flag_tmp1, 0, sizeof(size_t)*capacity);
     Q.memset(flag_tmp2, 0, sizeof(size_t)*capacity);
     Q.memset(flag_tmp3, 0, sizeof(size_t)*capacity);
+    #endif
     Q.wait();
 
-    info_t info{last, first, buff, flag, flag_tmp1, flag_tmp2, flag_tmp3};
+    info_t info{(size_t*)last, (size_t*)first, buff, (size_t*)flag, (size_t*)tmp_counter, flag_tmp1, flag_tmp2, flag_tmp3};
 
     //create mmap for first and buff
-    //volatile 
-    size_t *last_mmap = get_mmap_address(last, sizeof(size_t)*1, Q);
-    //volatile 
-    size_t *first_mmap = get_mmap_address(first, sizeof(size_t)*1, Q);
-    //last_mmap[0] = 5;
-    first_mmap[0] = 10;
-    packet_t *buff_mmap = get_mmap_address(buff, sizeof(packet_t)*capacity, Q);
-    //volatile 
-    size_t *flag_mmap = get_mmap_address(flag, sizeof(size_t)*capacity, Q);
+    //size_t *last_mmap = get_mmap_address(last, sizeof(size_t)*1, Q);
+    VLT size_t *last_mmap = get_mmap_address((size_t*)last, size, Q);
+    //size_t *first_mmap = get_mmap_address(first, sizeof(size_t)*1, Q);
+    VLT size_t *first_mmap = last_mmap+1;
 
-    std::cout<<"("<<first<<" "<<first_mmap<<") ("<<last<<" "<<last_mmap<<")\n";
+    //packet_t *buff_mmap = get_mmap_address(buff, sizeof(packet_t)*capacity, Q);
+    packet_t *buff_mmap = (packet_t *)(first_mmap+1);
+    //size_t *flag_mmap = get_mmap_address(flag, sizeof(size_t)*capacity, Q);
+    VLT size_t *flag_mmap = (size_t *)(buff_mmap+capacity);
+    VLT size_t *tmp_counter_mmap = (size_t *)(flag_mmap+capacity);
+
+    std::cout<<"("<<first_mmap<<" "<<first_mmap<<") ("<<last<<" "<<last_mmap<<")\n";
 
     std::thread host_thread = std::thread([=]() {
     //auto e_h = Q.submit([=](sycl::handler &h) {
@@ -127,37 +167,55 @@ int main() {
             std::cout<<"host thread: starting\n";
             fflush(stdout);
 
-#if 0
             size_t first_loc; 
             //while(true) {
-            for(int n=0;n<N;) {
+            for(int n=0;n<N*T;) {
                 first_loc = first_mmap[0];
                 //wait for data to be added by GPU
                 std::cout<<"host thread: first_loc "<<first_loc<<"\n";
                 fflush(stdout);
-                //while(buff_mmap[first_loc].flag == 0) { cpu_relax(); }
-                while(flag_mmap[first_loc] == 0) { cpu_relax(); }
+                //while(buff_mmap[first_loc%capacity].flag == 0) { cpu_relax(); }
+                size_t count_tmp = 0;
+                while(flag_mmap[first_loc%capacity] == 0) { cpu_relax();
+                    //DEBUG START
+                    count_tmp++;
+                    if(count_tmp%10000 == 0) {
+                        count_tmp = 0;
+                        std::string print_str = "";
+                        for(int i=0;i<T;i++) {
+                            print_str.append(std::to_string(tmp_counter_mmap[i]));
+                            print_str.append(" ");
+                        }
+                        print_str.append("\n");
+                        std::cout<<print_str;
+                        fflush(stdout);
+                    }
+                    //DEBUG END
+                }
                 std::cout<<"host thread: data found\n";
                 fflush(stdout);
 
                 //for(int i=first_mmap[0]; buff_mmap[i].flag == 1; i++)
                 for(int i=first_loc; flag_mmap[i%capacity] == 1; i++, n++)
                 {
-                    std::cout<<"host thread: data reading at "<<first_loc<<" "<<i<<" "<<n<<"\n";
-                    fflush(stdout);
+                    //std::cout<<"host thread: data reading at "<<first_loc<<" "<<i<<" "<<n<<"\n";
+                    //fflush(stdout);
 
                     //read the data and release the location
-                    //auto data = buff_mmap[i%capacity];
-                    //buff_mmap[i%capacity].flag = 0;
+                    auto data = buff_mmap[i%capacity];
+                    std::cout<<"host thread: data reading at "<<first_loc<<" "<<i<<" "<<n<<" ("<<data.dest<<" , "<<data.val<<")\n";
+                    fflush(stdout);
+                    buff_mmap[i%capacity].flag = 0; //not needed since we have separate flag array
 
-                    //flag_mmap[i%capacity] = 0;
+                    //reset flag to denote data is read
+                    flag_mmap[i%capacity] = 0;
 
-                    //first_mmap[0]= i+1;
+                    //increment first to denote data is read
+                    first_mmap[0]= i+1;
                 }
             }
             std::cout<<"Exiting host thread\n";
             fflush(stdout);
-#endif
     //    });
     //});
     });
@@ -168,34 +226,42 @@ int main() {
         //sycl::stream os(1024, 128, h);
         //h.single_task([=]() {
     	h.parallel_for(sycl::nd_range<1>{{T}, {T}}, [=](sycl::nd_item<1> idx) {
-            for(int i=0;i<N;i++) {
+            for(int64_t i=0;i<N;i++) {
                 oshmem_int64_t_put(idx.get_global_id(0) ,i, info);
             }
         });
     });
     std::cout<<"kernel launched\n";
-
     e.wait_and_throw();
     std::cout<<"kernel over\n";
+    fflush(stdout);
 
+    //DEBUG START
+    #if 0
     for(int i=0;i<capacity;i++)
         std::cout<<flag_mmap[i]<<" ";
     std::cout<<"\n";
+    fflush(stdout);
     for(int i=0;i<capacity;i++)
         std::cout<<info.flag_tmp1[i]<<" ";
     std::cout<<"\n";
+    fflush(stdout);
     for(int i=0;i<capacity;i++)
         std::cout<<info.flag_tmp2[i]<<" ";
     std::cout<<"\n";
+    fflush(stdout);
     for(int i=0;i<capacity;i++)
         std::cout<<info.flag_tmp3[i]<<" ";
     std::cout<<"\n";
     fflush(stdout);
+    #endif
+    //DEBUG END
+
     //e_h.wait_and_throw();
     host_thread.join();
-    sycl::free(last, Q);
-    sycl::free(first, Q);
-    sycl::free(buff, Q);
+    sycl::free((size_t*)last, Q);
+    //sycl::free(first, Q);
+    //sycl::free(buff, Q);
 
     //munmap(first_mmap, sizeof(size_t)*1);
     //munmap(buff_mmap, sizeof(packet_t)*capacity);
