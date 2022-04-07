@@ -63,11 +63,17 @@ int main() {
     //warmup
     for(int n=0;n<2;n++) {
     auto evt1 = Q1.submit( [&](sycl::handler &h) {
-        h.parallel_for(N, [=](sycl::id<1> i) {
+        h.parallel_for(N/2, [=](sycl::id<1> i) {
             buff1[i] = buff2[i];
         });
     });
+    auto evt2 = Q2.submit( [&](sycl::handler &h) {
+        h.parallel_for(N/2, [=](sycl::id<1> i) {
+            buff1[N/2+i] = buff2[N/2+i];
+        });
+    });
     evt1.wait();
+    evt2.wait();
     }
 
     auto start = std::chrono::high_resolution_clock::now();
@@ -75,12 +81,17 @@ int main() {
     for(int n=0;n<10;n++) {
     #if 1
     auto evt1 = Q1.submit( [&](sycl::handler &h) {
-        h.parallel_for(N, [=](sycl::id<1> i) {
+        h.parallel_for(N/2, [=](sycl::id<1> i) {
             buff1[i] = buff2[i];
-            //buff2[i] = buff1[i]; //faster
+        });
+    });
+    auto evt2 = Q2.submit( [&](sycl::handler &h) {
+        h.parallel_for(N/2, [=](sycl::id<1> i) {
+            buff1[N/2+i] = buff2[N/2+i];
         });
     });
     evt1.wait();
+    evt2.wait();
     #else
     Q1.memcpy(buff1, buff2, N*sizeof(int)).wait();
     //Q1.memcpy(buff2, buff1, N*sizeof(int)).wait(); //faster
