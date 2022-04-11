@@ -1,0 +1,5 @@
+
+add_executable(gpu_copy_kernel gpu_copy_kernel.cpp)
+add_executable(gpu_copy_kernel_two_side_rd_wr gpu_copy_kernel_two_side_rd_wr.cpp)
+add_executable(gpu_copy_kernel_two_side_rd gpu_copy_kernel_two_side_rd.cpp)
+
