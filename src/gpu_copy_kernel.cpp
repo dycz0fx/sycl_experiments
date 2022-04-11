@@ -64,15 +64,17 @@ int main() {
     for(int n=0;n<2;n++) {
     auto evt1 = Q1.submit( [&](sycl::handler &h) {
         h.parallel_for(N, [=](sycl::id<1> i) {
-            buff1[i] = buff2[i];
+            buff2[i] = i;
         });
     });
     evt1.wait();
     }
 
     auto start = std::chrono::high_resolution_clock::now();
+    //auto start = std::chrono::steady_clock::now();
 
-    for(int n=0;n<10;n++) {
+    const int rep = 10;
+    for(int n=0;n<rep;n++) {
     #if 1
     auto evt1 = Q1.submit( [&](sycl::handler &h) {
         h.parallel_for(N, [=](sycl::id<1> i) {
@@ -88,11 +90,22 @@ int main() {
     }
 
     auto end = std::chrono::high_resolution_clock::now();
+    //auto end = std::chrono::steady_clock::now();
 
-    std::cout << "time : " << std::chrono::duration_cast<std::chrono::microseconds>(end-start).count()<< " µs\n";
+    std::cout << "time : " << std::chrono::duration_cast<std::chrono::microseconds>(end-start).count()/rep<< " µs\n";
+
+    int* host_buff = sycl::malloc_host<int>(N, Q1);
+    Q1.memcpy(host_buff, buff1, N*sizeof(int)).wait();
+    for(int i=0;i<N;i++) {
+        if(host_buff[i] != i) {
+            std::cout<<"Error at index : "<<i<<" with value : "<<host_buff[i]<<std::endl;
+            break;
+        }
+    }
 
     sycl::free(buff1, Q1);
     sycl::free(buff2, Q2);
+    sycl::free(host_buff, Q1);
     return 0;
 }
 
