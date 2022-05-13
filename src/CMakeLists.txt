@@ -1,5 +1,7 @@
 
-add_executable(gpu_copy_kernel gpu_copy_kernel.cpp)
-add_executable(gpu_copy_kernel_two_side_rd_wr gpu_copy_kernel_two_side_rd_wr.cpp)
-add_executable(gpu_copy_kernel_two_side_rd gpu_copy_kernel_two_side_rd.cpp)
+if(DIR_gpu_copy_kernel_ONLY)
+    add_subdirectory(gpu_copy_kernel)
+else()
+    add_subdirectory(gpu_copy_kernel)
+endif()
 

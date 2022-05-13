@@ -1,6 +1,6 @@
 # sycl_experiments
 
-Experiment copying of data between GPUs in a node.
+Experiment with SYCL and Level Zero
 
 ### How to build
 
