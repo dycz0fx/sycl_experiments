@@ -1,6 +1,6 @@
-# sycl_experiments
+# sycl_experiments gpu_copy_kernel
 
-Experiment with copying data between GPUs in the same node.
+Experiment with SYCL, to copy data between GPUs on the same node using Xelink
 
 ### How to build
 
@@ -10,7 +10,7 @@ cd sycl_experiments
 mkdir build
 cd build
 cmake .. -DDIR_gpu_copy_kernel=1
-make
+make # cmake --build .
 srun ./src/gpu_copy_kernel/gpu_copy_kernel
 ```
 

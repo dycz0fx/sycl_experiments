@@ -10,7 +10,8 @@ cd sycl_experiments
 mkdir build
 cd build
 cmake ..
-make
+make # cmake --build .
 srun ./src/gpu_copy_kernel/gpu_copy_kernel
+#make clean # cmake --build . --target clean
 ```
 
