@@ -7,6 +7,7 @@
 #include<sys/mman.h>
 
 constexpr size_t T = 1;
+constexpr size_t N = 10;
 
 int main() {
     sycl::queue Q;
@@ -14,7 +15,7 @@ int main() {
     std::cout<<"device vendor : "<<Q.get_device().get_info<sycl::info::device::vendor>() <<"\n";
 
     size_t * last_device_mem = sycl::malloc_device<size_t>(2, Q);
-    int64_t *shared_temp = sycl::malloc_shared<int64_t>(1, Q);
+    int64_t *shared_temp = sycl::malloc_shared<int64_t>(N, Q);
 
     sycl::context ctx = Q.get_context();
     ze_ipc_mem_handle_t ze_ipc_handle;
@@ -35,7 +36,7 @@ int main() {
     std::thread host_thread = std::thread([=]() {
     //auto e_h = Q.submit([=](sycl::handler &h) {
     //    h.codeplay_host_task([=]() {
-            for(int i=0;i<10;i++) {
+            for(int i=0;i<N;i++) {
                 sleep(1);
                 dev_loc[0] = i;
             }
@@ -50,7 +51,7 @@ int main() {
             //os<<"kernel val: "<<last_device_mem[0]<<" "<<last_device_mem[1]<<"\n";
             double delay = 0;
             sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> last_atomic(last_device_mem[0]);
-            for(int i=0;i<10;i++) {
+            for(int i=0;i<N;i++) {
                 //shared_temp[i] = last_device_mem[0];
                 shared_temp[i] = last_atomic.load();
 
@@ -64,7 +65,7 @@ int main() {
     });
     e.wait_and_throw();
     std::cout<<"kernel over\n";
-    for(int i=0;i<10;i++)
+    for(int i=0;i<N;i++)
         std::cout<<shared_temp[i]<<"\n";
     //e_h.wait_and_throw();
     host_thread.join();

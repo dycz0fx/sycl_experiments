@@ -30,8 +30,8 @@ void oshmem_int64_t_put_nbi(int64_t dest, int64_t val, info_t info, sycl::nd_ite
     //TODO: Understand more about memory_order, memory_scope and address_space
 
     //find an index to put the packet
-    sycl::ONEAPI::atomic_ref<size_t, sycl::ONEAPI::memory_order::seq_cst, sycl::ONEAPI::memory_scope::device, sycl::access::address_space::global_device_space> last_device_atomic(info.last_device[0]);
-    size_t index = last_device_atomic.fetch_add(1, sycl::ONEAPI::memory_order::seq_cst);
+    sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::seq_cst, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> last_device_atomic(info.last_device[0]);
+    size_t index = last_device_atomic.fetch_add(1, sycl::memory_order::seq_cst);
    
     info.buff[index] = pkt;
 
@@ -40,9 +40,9 @@ void oshmem_int64_t_put_nbi(int64_t dest, int64_t val, info_t info, sycl::nd_ite
     //idx.barrier();
 
     //wait until the all data upto index is added so that there are no holes in the buffer
-    sycl::ONEAPI::atomic_ref<size_t, sycl::ONEAPI::memory_order::seq_cst, sycl::ONEAPI::memory_scope::device, sycl::access::address_space::global_device_space> last_atomic(info.last[0]);
+    sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::seq_cst, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> last_atomic(info.last[0]);
     size_t expected = index;
-    while(!last_atomic.compare_exchange_strong(expected, index+1, sycl::ONEAPI::memory_order::seq_cst, sycl::ONEAPI::memory_order::seq_cst)) {
+    while(!last_atomic.compare_exchange_strong(expected, index+1, sycl::memory_order::seq_cst, sycl::memory_order::seq_cst)) {
         expected = index;
     }
 }
