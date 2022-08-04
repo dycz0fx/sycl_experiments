@@ -17,6 +17,7 @@ int main(int argc, char *argv[]) {
   if (argc < 2) exit(1);
   count = atol(argv[1]);
   sycl::queue Q;
+  std::cout<<"count : "<< count << std::endl;
   std::cout<<"selected device : "<<Q.get_device().get_info<sycl::info::device::name>() << std::endl;
   std::cout<<"device vendor : "<<Q.get_device().get_info<sycl::info::device::vendor>() << std::endl;
   
@@ -39,21 +40,7 @@ int main(int argc, char *argv[]) {
   std::cout<<"kernel going to launch" << std::endl;
 
   e = Q.submit([&](sycl::handler &h) {
-      sycl::stream os(1024, 128, h);
-      //h.single_task([=]() {
-      h.parallel_for(sycl::nd_range<1>{{1}, {1}}, [=](sycl::nd_item<1> idx) {
-	  os<<"kernel start" << sycl::stream_manipulator::endl;
-	 os << "got " << sycl::stream_manipulator::endl;
-	  os<<"kernel exit"  << sycl::stream_manipulator::endl;
-        });
-    });
-  std::cout<<"kernel launched" << std::endl;
-  e.wait_and_throw();
-  std::cout<<"kernel finished" << std::endl;
-  std::cout<<"kernel going to launch" << std::endl;
-  
-  e = Q.submit([&](sycl::handler &h) {
-      sycl::stream os(1024, 128, h);
+      //sycl::stream os(1024, 128, h);
       //h.single_task([=]() {
       h.parallel_for(sycl::nd_range<1>{{1}, {1}}, [=](sycl::nd_item<1> idx) {
 	  //	  os<<"kernel start" << sycl::stream_manipulator::endl;
@@ -69,7 +56,7 @@ int main(int argc, char *argv[]) {
 	    //os << "got " << temp << sycl::stream_manipulator::endl;
 	    prev = temp;
 	    gpu_to_cpu.store(temp);
-	  } while (prev != count);
+	  } while (prev < count-1);
 	  //os<<"kernel exit"  << sycl::stream_manipulator::endl;
         });
     });
@@ -83,7 +70,7 @@ int main(int argc, char *argv[]) {
 	while (i != gpu_to_cpu.load());
       }
       unsigned long end_time = rdtscp();
-      std::cout << "count " << count << " tsc each " << count / (end_time - start_time) << std::endl;
+      std::cout << "count " << count << " tsc each " << (end_time - start_time) / count << std::endl;
     }
 
       
