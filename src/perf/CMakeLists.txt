@@ -1,0 +1,12 @@
+
+link_libraries(ze_loader)
+
+add_executable(mallocbug mallocbug.cpp)
+add_executable(host host.cpp)
+add_executable(host_mmap host_mmap.cpp)
+add_executable(gpu_cpu_put_flags_lcs gpu_cpu_put_flags_lcs.cpp)
+
+set(SRUN srun)
+add_test(NAME host_test COMMAND ${SRUN} ./host)
+add_test(NAME host_mmap_test COMMAND ${SRUN} ./host_mmap)
+add_test(NAME gpu_cpu_put_flags_lcs_test COMMAND ${SRUN} ./gpu_cpu_put_flags_lcs)
