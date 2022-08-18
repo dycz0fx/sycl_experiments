@@ -1,6 +1,6 @@
 
 link_libraries(ze_loader)
-
+add_compile_options(-mavx512f)
 add_executable(mallocbug mallocbug.cpp)
 add_executable(host host.cpp)
 add_executable(host_mmap host_mmap.cpp)
