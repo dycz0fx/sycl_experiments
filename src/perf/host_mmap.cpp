@@ -17,12 +17,10 @@ constexpr uint64_t cpu_to_gpu_index = 0;
 constexpr uint64_t gpu_to_cpu_index = 8;
 #define cpu_relax() asm volatile("rep; nop")
 
-#ifndef USE_MEMSET
-#define USE_MEMSET 0
-#endif
-#ifndef USE_MEMCPY
-#define USE_MEMCPY 0
-#endif
+constexpr int use_memcpy = 0;
+constexpr int use_loop = 0;
+constexpr int use_avx = 1;
+
 template<typename T>
 T *get_mmap_address(T * device_ptr, size_t size, sycl::queue Q) {
     sycl::context ctx = Q.get_context();
@@ -51,13 +49,24 @@ T *get_mmap_address(T * device_ptr, size_t size, sycl::queue Q) {
     return (T*)base;
 }
 
+void usage()
+{
+  std::cout << "./host_mmap cputogpu|gputocpu count rsize wsize" << std::endl;
+  exit(1);
+}
+
 int main(int argc, char *argv[]) {
+  int cputogpu;
   uint64_t count;
   uint64_t rblocksize, wblocksize;
-  if (argc < 4) exit(1);
-  count = atol(argv[1]);
-  rblocksize = atol(argv[2]);
-  wblocksize = atol(argv[3]);
+  if (argc < 5) usage();
+  if (strcmp("cputogpu", argv[1]) == 0)
+    cputogpu = 1;
+  else
+    cputogpu = 0;
+  count = atol(argv[2]);
+  rblocksize = atol(argv[3]);
+  wblocksize = atol(argv[4]);
   if (rblocksize > BUFSIZE/2) rblocksize = BUFSIZE/2;
   if (wblocksize > BUFSIZE/2) wblocksize = BUFSIZE/2;
   sycl::queue Q;
@@ -70,6 +79,11 @@ int main(int argc, char *argv[]) {
   void * tmpptr =  sycl::aligned_alloc_device(4096, BUFSIZE, Q);
   uint64_t *device_data_mem = (uint64_t *) tmpptr;
   std::cout << " device_data_mem " << device_data_mem << std::endl;
+
+  tmpptr =  sycl::aligned_alloc_device(4096, BUFSIZE, Q);
+  uint64_t *extra_device_mem = (uint64_t *) tmpptr;
+  std::cout << " extra_device_mem " << extra_device_mem << std::endl;
+
   std::array<uint64_t, BUFSIZE> host_data_array;
   memset(&host_data_array[0], 0, BUFSIZE);
   
@@ -99,71 +113,136 @@ int main(int argc, char *argv[]) {
   e.wait_and_throw();
     
   std::cout << "kernel going to launch" << std::endl;
-
-  e = Q.submit([&](sycl::handler &h) {
-      //   sycl::stream os(1024, 128, h);
-      //h.single_task([=]() {
-      h.parallel_for(sycl::nd_range<1>{{1}, {1}}, [=](sycl::nd_item<1> idx) {
-	  //  os<<"kernel start\n";
-	  uint64_t prev = (uint64_t) -1L;
-	  sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> cpu_to_gpu(device_ctl_mem[cpu_to_gpu_index]);
-	  sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> gpu_to_cpu(device_ctl_mem[gpu_to_cpu_index]);
-	  do {
-	    uint64_t temp;
-	    for (;;) {
-	      temp = cpu_to_gpu.load();
-	      if (temp != prev) break;
-	    }
-	    prev = temp;
-	    if (wblocksize > 0)
-#if USE_MEMSET	      
-	      memset(device_data_mem, temp & 255, wblocksize);
-#else
-	    for (int i = 0; i < rblocksize >> 3; i += 1) {
-	      device_data_mem[i] = 0;
-	    }
-#endif	    
-	    gpu_to_cpu.store(temp);
-	  } while (prev < count-1 );
-	  // os<<"kernel exit\n";
-        });
-    });
-  std::cout<<"kernel launched" << std::endl;
+  unsigned long start_time, end_time;
+  struct timespec ts_start, ts_end;
+  if (cputogpu) {
+    e = Q.submit([&](sycl::handler &h) {
+	//   sycl::stream os(1024, 128, h);
+	//h.single_task([=]() {
+	h.parallel_for(sycl::nd_range<1>{{1}, {1}}, [=](sycl::nd_item<1> idx) {
+	    //  os<<"kernel start\n";
+	    uint64_t prev = (uint64_t) -1L;
+	    sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> cpu_to_gpu(device_ctl_mem[cpu_to_gpu_index]);
+	    sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> gpu_to_cpu(device_ctl_mem[gpu_to_cpu_index]);
+	    do {
+	      uint64_t temp;
+	      for (;;) {
+		temp = cpu_to_gpu.load();
+		if (temp != prev) break;
+	      }
+	      prev = temp;
+	      if (rblocksize > 0)
+		if (use_memcpy) {
+		  memcpy(extra_device_mem, device_data_mem, rblocksize);
+		}
+	      if (use_loop) {
+		  for (int i = 0; i < rblocksize >> 3; i += 1) {
+		    extra_device_mem[i] = device_data_mem[i];
+		  }
+		}
+	      gpu_to_cpu.store(temp);
+	    } while (prev < count-1 );
+	    // os<<"kernel exit\n";
+	  }
+	  );
+      });
+    std::cout<<"kernel launched" << std::endl;
     {
-      struct timespec ts_start;
       clock_gettime(CLOCK_REALTIME, &ts_start);
-      unsigned long start_time = rdtsc();
+      start_time = rdtsc();
       volatile uint64_t *c_to_g = & host_ctl_map[cpu_to_gpu_index];
       volatile uint64_t *g_to_c = & host_ctl_map[gpu_to_cpu_index];
-
+      
+      for (int i = 0; i < count; i += 1) {
+	if (wblocksize > 0) {
+	  if (use_memcpy) {
+	    memcpy(&host_data_map[0], &host_data_array[0], wblocksize);
+	  }
+	  if (use_loop) {
+	    for (int i = 0; i < wblocksize >> 3; i += 1) {
+	      host_data_map[i] = host_data_array[i];
+	    }
+	  }
+	  if (use_avx) {
+	    for (int i = 0; i < wblocksize; i += 64) {
+	      __m512i temp = _mm512_load_epi32((void *) &host_data_array[i]);
+	      _mm512_storeu_si512((void *) &host_data_map[i], temp);
+	    }
+	  }
+	}
+	*c_to_g = i;
+	while (i != *g_to_c) cpu_relax();
+      }
+      end_time = rdtscp();
+      clock_gettime(CLOCK_REALTIME, &ts_end);
+    }
+    } else {  // gputocpu
+    e = Q.submit([&](sycl::handler &h) {
+	//   sycl::stream os(1024, 128, h);
+	//h.single_task([=]() {
+	h.parallel_for(sycl::nd_range<1>{{1}, {1}}, [=](sycl::nd_item<1> idx) {
+	    //  os<<"kernel start\n";
+	    uint64_t prev = (uint64_t) -1L;
+	    sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> cpu_to_gpu(device_ctl_mem[cpu_to_gpu_index]);
+	    sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> gpu_to_cpu(device_ctl_mem[gpu_to_cpu_index]);
+	    do {
+	      uint64_t temp;
+	      for (;;) {
+		temp = cpu_to_gpu.load();
+		if (temp != prev) break;
+	      }
+	      prev = temp;
+	      if (wblocksize > 0)
+		if (use_memcpy) {
+		  memcpy(device_data_mem, extra_device_mem, wblocksize);
+		}
+	      if (use_loop) {
+		  for (int i = 0; i < rblocksize >> 3; i += 1) {
+		    device_data_mem[i] = 0;
+		  }
+		}
+	      gpu_to_cpu.store(temp);
+	    } while (prev < count-1 );
+	    // os<<"kernel exit\n";
+	  });
+      });
+    std::cout<<"kernel launched" << std::endl;
+    {
+      clock_gettime(CLOCK_REALTIME, &ts_start);
+      start_time = rdtsc();
+      volatile uint64_t *c_to_g = & host_ctl_map[cpu_to_gpu_index];
+      volatile uint64_t *g_to_c = & host_ctl_map[gpu_to_cpu_index];
+      
       for (int i = 0; i < count; i += 1) {
 	*c_to_g = i;
 	while (i != *g_to_c) cpu_relax();
 	if (rblocksize > 0) {
-#if USE_MEMCPY
-	  memcpy(&host_data_array[0], &host_data_map[0], rblocksize);
-#else
-	  if (1) {
+	  if (use_memcpy) {
+	    memcpy(&host_data_array[0], &host_data_map[0], rblocksize);
+	  }
+	  if (use_loop) {
 	    for (int i = 0; i < rblocksize >> 3; i += 1) {
 	      host_data_array[i] = host_data_map[i];
 	    }
-	  } else {
+	  }
+	  if (use_avx) {
 	    for (int i = 0; i < rblocksize; i += 64) {
 	      __m512i temp = _mm512_load_epi32((void *) &host_data_map[i]);
 	      _mm512_storeu_si512((void *) &host_data_array[i], temp);
 	    }
 	  }
-#endif
 	}
       }
-      unsigned long end_time = rdtscp();
-      struct timespec ts_end;
+      end_time = rdtscp();
       clock_gettime(CLOCK_REALTIME, &ts_end);
-      double elapsed = ((double) (ts_end.tv_sec - ts_start.tv_sec)) * 1000000000.0 +
-	((double) (ts_end.tv_nsec - ts_start.tv_nsec));
-      std::cout << "count " << count << " tsc each " << (end_time - start_time) / count << std::endl;
-      std::cout << "count " << count << " w " << wblocksize << " r " << rblocksize << " nsec each " << elapsed / ((double) count) << std::endl;
     }
+  }
+    /* common cleanup */
+    double elapsed = ((double) (ts_end.tv_sec - ts_start.tv_sec)) * 1000000000.0 +
+	((double) (ts_end.tv_nsec - ts_start.tv_nsec));
+    //      std::cout << "count " << count << " tsc each " << (end_time - start_time) / count << std::endl;
+      std::cout << argv[1] << " count " << count << " w " << wblocksize << " r " << rblocksize << " nsec each " << elapsed / ((double) count) << std::endl;
+    
 
       
     e.wait_and_throw();
