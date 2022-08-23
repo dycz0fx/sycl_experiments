@@ -47,6 +47,7 @@ int main(int argc, char *argv[]) {
 	  uint64_t prev = (uint64_t) -1L;
 	  sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> cpu_to_gpu(host_mem[cpu_to_gpu_index]);
 	  sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> gpu_to_cpu(host_mem[gpu_to_cpu_index]);
+#if 0	  
 	  do {
 	    uint64_t temp;
 	    for (;;) {
@@ -57,25 +58,36 @@ int main(int argc, char *argv[]) {
 	    prev = temp;
 	    gpu_to_cpu.store(temp);
 	  } while (prev < count-1);
+#endif
+	  for (int i = 0; i < 1024; i += 1) host_mem[i] = i;
 	  //os<<"kernel exit"  << sycl::stream_manipulator::endl;
         });
     });
   std::cout<<"kernel launched" << std::endl;
+    e.wait_and_throw();
+    std::cout<<"kernel over" << std::endl;
+
+
     {
       unsigned long start_time = rdtsc();
       sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> cpu_to_gpu(host_map[cpu_to_gpu_index]);
       sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> gpu_to_cpu(host_map[gpu_to_cpu_index]);
+#if 0
       for (int i = 0; i < count; i += 1) {
 	cpu_to_gpu.store(i);
 	while (i != gpu_to_cpu.load());
+      }
+#endif
+      for (int i = 0; i < 1024; i += 1) {
+	if (host_mem[i] != i)
+	  std::cout << "err idx " << i << " is " << host_mem[i] << std::endl;
       }
       unsigned long end_time = rdtscp();
       std::cout << "count " << count << " tsc each " << (end_time - start_time) / count << std::endl;
     }
 
       
-    e.wait_and_throw();
-    std::cout<<"kernel over" << std::endl;
+
     sycl::free(host_mem, Q);
     return 0;
 }

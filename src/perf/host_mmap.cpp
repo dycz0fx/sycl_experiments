@@ -19,11 +19,10 @@ constexpr uint64_t gpu_to_cpu_index = 8;
 
 constexpr int use_check = 0;
 constexpr int gpu_memcpy = 0;
-constexpr int gpu_loop = 0;
+constexpr int gpu_loop = 1;
  int use_memcpy = 0;
  int use_loop = 0;
  int use_avx = 0;
-
 
 void fillbuf(uint64_t *p, uint64_t size, int iter)
 {
@@ -72,15 +71,17 @@ T *get_mmap_address(T * device_ptr, size_t size, sycl::queue Q) {
 
 void usage()
 {
-  std::cout << "./host_mmap cputogpu|gputocpu memcpy|loop|avx count rsize wsize" << std::endl;
+  std::cout << "./host_mmap cputogpu|gputocpu memcpy|loop|avx host|device count rsize wsize" << std::endl;
   exit(1);
 }
 
 int main(int argc, char *argv[]) {
+  int use_hostmem = 0;
+  int use_devicemem = 0;
   int cputogpu;
   uint64_t count;
   uint64_t rblocksize, wblocksize;
-  if (argc < 6) usage();
+  if (argc < 7) usage();
   if (strcmp("cputogpu", argv[1]) == 0)
     cputogpu = 1;
   else
@@ -89,10 +90,14 @@ int main(int argc, char *argv[]) {
   if (strcmp("loop", argv[2]) == 0) use_loop = 1;
   if (strcmp("avx", argv[2]) == 0) use_avx = 1;
 
+  if (strcmp("host", argv[3]) == 0) use_hostmem = 1;
+  if (strcmp("device", argv[3]) == 0) use_devicemem = 1;
+
+
   
-  count = atol(argv[3]);
-  rblocksize = atol(argv[4]);
-  wblocksize = atol(argv[5]);
+  count = atol(argv[4]);
+  rblocksize = atol(argv[5]);
+  wblocksize = atol(argv[6]);
   if (rblocksize > BUFSIZE/2) rblocksize = BUFSIZE/2;
   if (wblocksize > BUFSIZE/2) wblocksize = BUFSIZE/2;
   sycl::queue Q;
@@ -106,6 +111,10 @@ int main(int argc, char *argv[]) {
   uint64_t *device_data_mem = (uint64_t *) tmpptr;
   std::cout << " device_data_mem " << device_data_mem << std::endl;
 
+  tmpptr =  sycl::aligned_alloc_host(4096, BUFSIZE, Q);
+  uint64_t *host_data_mem = (uint64_t *) tmpptr;
+  std::cout << " host_data_mem " << host_data_mem << std::endl;
+
   tmpptr =  sycl::aligned_alloc_device(4096, BUFSIZE, Q);
   uint64_t *extra_device_mem = (uint64_t *) tmpptr;
   std::cout << " extra_device_mem " << extra_device_mem << std::endl;
@@ -117,20 +126,32 @@ int main(int argc, char *argv[]) {
   std::cout << " device_ctl_mem " << device_ctl_mem << std::endl;
   std::array<uint64_t, CTLSIZE> host_ctl_array;
   memset(&host_ctl_array[0], 0, CTLSIZE);
-  
+
+
   //create mmap mapping of usm device memory on host
   sycl::context ctx = Q.get_context();
   sleep(1);
-  std::cout << "About to call mmap" << std::endl;
-  
-  uint64_t *host_data_map = get_mmap_address(device_data_mem, BUFSIZE / 2, Q);
-  std::cout << " host_data_map " << host_data_map << std::endl;
+  uint64_t *host_data_map;   // pointer for host to use
+  uint64_t *data_mem;   // pointer for device to use
 
+    std::cout << "About to call mmap" << std::endl;
+
+  if (use_devicemem) {
+    data_mem = device_data_mem;
+    host_data_map = get_mmap_address(device_data_mem, BUFSIZE / 2, Q);
+  } else {
+    data_mem = host_data_mem;
+    host_data_map = data_mem;
+  }
+  
+  std::cout << " host_data_map " << host_data_map << std::endl;
+  
+  
   uint64_t *host_ctl_map = get_mmap_address(device_ctl_mem, CTLSIZE, Q);
   std::cout << " host_ctl_map " << host_ctl_map << std::endl;
   
   auto e = Q.submit([&](sycl::handler &h) {
-      h.memcpy(device_data_mem, &host_data_array[0], BUFSIZE/2);
+      h.memcpy(data_mem, &host_data_array[0], BUFSIZE/2);
     });
   e.wait_and_throw();
   e = Q.submit([&](sycl::handler &h) {
@@ -160,16 +181,16 @@ int main(int argc, char *argv[]) {
 	      prev = temp;
 	      if (rblocksize > 0) {
 		if (gpu_memcpy) {
-		  memcpy(extra_device_mem, device_data_mem, rblocksize);
+		  memcpy(extra_device_mem, data_mem, rblocksize);
 		}
 	        if (gpu_loop) {
 		  for (int j = 0; j < rblocksize >> 3; j += 1) {
-		    extra_device_mem[j] = device_data_mem[j];
+		    extra_device_mem[j] = data_mem[j];
 		  }
 		}
 	      }
 	      if (use_check) {
-		err = checkbuf(device_data_mem, wblocksize, temp);
+		err = checkbuf(extra_device_mem, rblocksize, temp);
 	      }
 	      gpu_to_cpu.store((err << 32) + temp);
 	    } while (prev < count-1 );
@@ -236,17 +257,17 @@ int main(int argc, char *argv[]) {
 		if (temp != prev) break;
 	      }
 	      prev = temp;
+	      if (use_check) {
+		fillbuf(extra_device_mem, wblocksize, temp);
+	      }
 	      if (wblocksize > 0)
 		if (gpu_memcpy) {
-		  memcpy(device_data_mem, extra_device_mem, wblocksize);
+		  memcpy(data_mem, extra_device_mem, wblocksize);
 		}
 	        if (gpu_loop) {
 		  for (int j = 0; j < rblocksize >> 3; j += 1) {
-		    device_data_mem[j] = 0;
+		    data_mem[j] = extra_device_mem[j];
 		  }
-		}
-		if (use_check) {
-		  fillbuf(device_data_mem, rblocksize, temp);
 		}
 	      gpu_to_cpu.store(temp);
 	    } while (prev < count-1 );
@@ -297,6 +318,8 @@ int main(int argc, char *argv[]) {
     if (use_memcpy) std::cout << " memcpy ";
     if (use_loop) std::cout << " loop ";
     if (use_avx) std::cout << " avx ";
+    if (use_devicemem) std::cout << "devicemem ";
+    if (use_hostmem) std::cout << "hostmem ";
     double mbs = (rblocksize > wblocksize) ? rblocksize : wblocksize;
     mbs = (mbs * 1000) / (elapsed / ((double) count));
     std::cout << " count " << count << " w " << wblocksize << " r " << rblocksize << " nsec each " << elapsed / ((double) count) << " MB/s " << mbs << std::endl;
