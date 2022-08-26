@@ -129,50 +129,68 @@ void ProcessArgs(int argc, char **argv)
 	}
 	case CMD_CPUTOGPU: {
 	  glob_cputogpu = true;
+	  glob_gputocpu = false;
 	  break;
 	}
 	case CMD_GPUTOCPU: {
+	  glob_cputogpu = false;
 	  glob_gputocpu = true;
 	  break;
 	}
 	case CMD_DEVICEDATA: {
 	  glob_devicedata = true;
+	  glob_hostdata = false;
 	  break;
 	}
 	case CMD_HOSTDATA: {
+	  glob_devicedata = false;
 	  glob_hostdata = true;
 	  break;
 	}
 	case CMD_DEVICECTL: {
 	  glob_devicectl = true;
+	  glob_hostctl = false;
+	  glob_splitctl = false;
 	  break;
 	}
 	case CMD_HOSTCTL: {
+	  glob_devicectl = false;
 	  glob_hostctl = true;
+	  glob_splitctl = false;
 	  break;
 	}
 	case CMD_SPLITCTL: {
+	  glob_devicectl = false;
+	  glob_hostctl = false;
 	  glob_splitctl = true;
 	  break;
 	}
 
 	case CMD_HOSTLOOP: {
 	  glob_hostloop = true;
+	  glob_hostmemcpy = false;
+	  glob_hostavx = false;
 	  break;
 	}
 	case CMD_HOSTMEMCPY: {
+	  glob_hostloop = false;
 	  glob_hostmemcpy = true;
+	  glob_hostavx = false;
 	  break;
 	}
 	case CMD_HOSTAVX: {
+	  glob_hostloop = false;
+	  glob_hostmemcpy = false;
 	  glob_hostavx = true;
 	  break;
 	}
 	case CMD_DEVICELOOP: {
 	  glob_deviceloop = true;
+	  glob_devicememcpy = false;
 	  break;
 	}
 	case CMD_DEVICEMEMCPY: {
+	  glob_deviceloop = false;
 	  glob_devicememcpy = true;
 	  break;
 	}
@@ -242,8 +260,8 @@ int main(int argc, char *argv[]) {
   int loc_deviceloop = glob_deviceloop;
   int loc_devicememcpy = glob_devicememcpy;
 
-  if (loc_readsize > BUFSIZE/2) loc_readsize = BUFSIZE/2;
-  if (loc_writesize > BUFSIZE/2) loc_writesize = BUFSIZE/2;
+  if (loc_readsize > BUFSIZE/4) loc_readsize = BUFSIZE/4;
+  if (loc_writesize > BUFSIZE/4) loc_writesize = BUFSIZE/4;
   sycl::queue Q;
   std::cout<<"selected device : "<<Q.get_device().get_info<sycl::info::device::name>() << std::endl;
   std::cout<<"device vendor : "<<Q.get_device().get_info<sycl::info::device::vendor>() << std::endl;
@@ -279,17 +297,22 @@ int main(int argc, char *argv[]) {
   sycl::context ctx = Q.get_context();
 
   uint64_t *host_data_map;   // pointer for host to use
-  uint64_t *data_mem;   // pointer for device to use
+  uint64_t *device_mem;   // pointer for device to use
+  uint64_t *host_mem;   // pointer for host to use
 
-    std::cout << "About to call mmap" << std::endl;
+  std::cout << "About to call mmap" << std::endl;
 
   if (loc_devicedata) {
-    data_mem = device_data_mem;
     host_data_map = get_mmap_address(device_data_mem, BUFSIZE / 2, Q);
+  }
+
+  if (loc_devicedata) {
+    device_mem = device_data_mem;
+    host_mem = host_data_map;
     std::cout << " host_data_map " << host_data_map << std::endl;
   } else {
-    data_mem = host_data_mem;
-    host_data_map = data_mem;
+    device_mem = host_data_mem;
+    host_mem = host_data_mem;
   }
 
   uint64_t *host_cputogpu;
@@ -327,7 +350,7 @@ int main(int argc, char *argv[]) {
   
   // initialize device memory  
   auto e = Q.submit([&](sycl::handler &h) {
-      h.memcpy(data_mem, &host_data_array[0], BUFSIZE/2);
+      h.memcpy(device_mem, &host_data_array[0], BUFSIZE/2);
     });
   e.wait_and_throw();
   e = Q.submit([&](sycl::handler &h) {
@@ -362,6 +385,11 @@ int main(int argc, char *argv[]) {
   unsigned long start_time, end_time;
   struct timespec ts_start, ts_end;
   if (loc_cputogpu) {
+    // initialize the flag
+    volatile uint64_t *c_to_g = host_cputogpu;
+    volatile uint64_t *g_to_c = host_gputocpu;
+    *c_to_g = -1L;  /* initial non-value */
+    *g_to_c = -1L;  /* initial non-value */
     e = Q.submit([&](sycl::handler &h) {
 	//   sycl::stream os(1024, 128, h);
 	//h.single_task([=]() {
@@ -370,20 +398,20 @@ int main(int argc, char *argv[]) {
 	    uint64_t prev = (uint64_t) -1L;
 	    sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> cpu_to_gpu(device_cputogpu[0]);
 	    sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> gpu_to_cpu(device_gputocpu[0]);
+	    uint64_t i;
 	    do {
 	      uint64_t err = 0;
-	      uint64_t temp;
 	      for (;;) {
-		temp = cpu_to_gpu.load();
-		if (temp != prev) break;
+		i = cpu_to_gpu.load();
+		if (i != prev) break;
 	      }
-	      prev = temp;
+	      prev = i;
 	      if (loc_readsize > 0) {
 		uint64_t *p;
-		if (prev & 1) {
-		  p = &data_mem[BUFSIZE >> 4];
+		if (i & 1) {
+		  p = &device_mem[loc_readsize >> 3];
 		} else {
-		  p = &data_mem[0];
+		  p = &device_mem[0];
 		}
 		if (loc_devicememcpy) {
 		  memcpy(extra_device_mem, p, loc_readsize);
@@ -395,10 +423,10 @@ int main(int argc, char *argv[]) {
 		}
 	      }
 	      if (loc_validate) {
-		err = checkbuf(extra_device_mem, loc_readsize, temp);
+		err = checkbuf(extra_device_mem, loc_readsize, i);
 	      }
-	      gpu_to_cpu.store((err << 32) + temp);
-	    } while (prev < loc_count-1 );
+	      gpu_to_cpu.store((err << 32) + i);
+	    } while (i < (loc_count-1) );
 	    // os<<"kernel exit\n";
 	  }
 	  );
@@ -407,20 +435,24 @@ int main(int argc, char *argv[]) {
     { // start of host block for cputogpu
       clock_gettime(CLOCK_REALTIME, &ts_start);
       start_time = rdtsc();
-      volatile uint64_t *c_to_g = host_cputogpu;
-      volatile uint64_t *g_to_c = host_gputocpu;
-      
+      // loop start code to initialize initial message
+      fillbuf(&host_data_array[0], loc_writesize, 0);
+      memcpy(host_mem, &host_data_array[0], loc_writesize);
+      clock_gettime(CLOCK_REALTIME, &ts_start);
+      start_time = rdtsc();
       for (int i = 0; i < loc_count; i += 1) {
+	*c_to_g = i;
 	if (loc_writesize > 0) {
+	  // this block is preparing the <next> message while we wait for the current one
 	  uint64_t *p;
 	  if (i & 1) {
-	    p = &host_data_map[BUFSIZE >> 4];
+	    p = &host_mem[0];
 	  } else {
-	    p = &host_data_map[0];
+	    p = &host_mem[loc_writesize >> 3];
 	  }
 	  if (loc_validate) {
-	    fillbuf(&host_data_array[0], loc_writesize, i);
-	    if (checkbuf(&host_data_array[0], loc_writesize, i) != 0)
+	    fillbuf(&host_data_array[0], loc_writesize, i + 1);
+	    if (checkbuf(&host_data_array[0], loc_writesize, i + 1) != 0)
 	      std::cout << "fillbuf failed" << std::endl;
 	  }
 	  if (loc_hostmemcpy) {
@@ -434,13 +466,12 @@ int main(int argc, char *argv[]) {
 	  if (loc_hostavx) {
 	    for (int j = 0; j < loc_writesize>>3; j += 8) {
 	      __m512i temp = _mm512_load_epi32((void *) &host_data_array[j]);
-	      _mm512_store_si512((void *) &host_data_map[j], temp);
+	      _mm512_store_si512((void *) &p[j], temp);
 	    }
 	  }
 	}
-	*c_to_g = i;
 	uint64_t temp;
-	for (;;) {
+	for (;;) {   // poll for the ack for the prev message
 	  temp = *g_to_c;
 	  if ((temp & 0xffffffff) == i) break;
 	  cpu_relax();
@@ -454,42 +485,47 @@ int main(int argc, char *argv[]) {
     }  // end of host block for cputogpu
     e.wait_and_throw();
     } else {  // gputocpu
+      volatile uint64_t *c_to_g = host_cputogpu;
+      volatile uint64_t *g_to_c = host_gputocpu;
+      uint64_t prev = -1L;
+      *g_to_c = prev;
+      *c_to_g = prev;
     e = Q.submit([&](sycl::handler &h) {
 	//   sycl::stream os(1024, 128, h);
 	//h.single_task([=]() {
 	h.parallel_for(sycl::nd_range<1>{{1}, {1}}, [=](sycl::nd_item<1> idx) {
 	    //  os<<"kernel start\n";
-	    uint64_t prev = (uint64_t) -1L;
 	    sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> cpu_to_gpu(device_cputogpu[0]);
 	    sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> gpu_to_cpu(device_gputocpu[0]);
-	    do {
-	      uint64_t temp;
+	    /* preload first message */
+	    fillbuf(extra_device_mem, loc_writesize, 0);
+	    memcpy(device_mem, extra_device_mem, loc_writesize);
+	    for (int i = 0; i < loc_count; i += 1) {
 	      uint64_t *p;
-	      if (temp & 1) {
-		p = &data_mem[BUFSIZE>>4];
+	      gpu_to_cpu.store(i);
+	      if (i & 1) {
+		p = &device_mem[0];
 	      } else {
-		p = &data_mem[0];
+		p = &device_mem[loc_writesize >> 3];
 	      }
 	      if (loc_validate) {
-		fillbuf(extra_device_mem, loc_writesize, temp);
+		fillbuf(extra_device_mem, loc_writesize, i+1);
 	      }
-	      if (loc_writesize > 0) {
+	      if (loc_writesize > 0) {  // write the next message 
 		if (loc_devicememcpy) {
 		  memcpy(p, extra_device_mem, loc_writesize);
 		}
 	        if (loc_deviceloop) {
-		  for (int j = 0; j < loc_readsize >> 3; j += 1) {
+		  for (int j = 0; j < loc_writesize >> 3; j += 1) {
 		    p[j] = extra_device_mem[j];
 		  }
 		}
 	      }
 	      for (;;) {
-		temp = cpu_to_gpu.load();
-		if (temp != prev) break;
+		uint64_t temp = cpu_to_gpu.load();
+		if (temp == i) break;
 	      }
-	      prev = temp;
-	      gpu_to_cpu.store(temp);
-	    } while (prev < loc_count-1 );
+	    }
 	    // os<<"kernel exit\n";
 	  });
       });
@@ -497,17 +533,19 @@ int main(int argc, char *argv[]) {
     {  // start of host block for gputocpu
       clock_gettime(CLOCK_REALTIME, &ts_start);
       start_time = rdtsc();
-      volatile uint64_t *c_to_g = host_cputogpu;
-      volatile uint64_t *g_to_c = host_gputocpu;
-      
-      for (int i = 0; i < loc_count; i += 1) {
-	*c_to_g = i;
-	while (i != *g_to_c) cpu_relax();
+      uint64_t i = 0;
+      do {
+	for (;;) {
+	  i = *g_to_c;
+	  if (prev != i) break;
+	}
+	prev = i;
 	uint64_t *p;
-	if (i & 0) {
-	  p = &host_data_map[0];
+	//std::cout << " received count " << i << std::endl;
+	if (i & 1) {
+	  p = &host_mem[loc_readsize >> 3];
 	} else {
-	  p = &host_data_map[BUFSIZE>>4];
+	  p = &host_mem[0];
 	}
 	if (loc_readsize > 0) {
 	  if (loc_hostmemcpy) {
@@ -529,7 +567,8 @@ int main(int argc, char *argv[]) {
 	    if (err != 0) std::cout << "iteration " << i << " errors " << err << std::endl;
 	  }
 	}
-      }
+	*c_to_g = i;
+      } while (i < (loc_count - 1));
       end_time = rdtscp();
       clock_gettime(CLOCK_REALTIME, &ts_end);
     }  // end of host block for gputocpu
