@@ -12,6 +12,8 @@
 #include <sys/stat.h>
 #include <immintrin.h>
 
+#define NSEC_IN_SEC 1000000000.0
+
 constexpr size_t BUFSIZE = (1L << 21);  //allocate 2 MB, to permit double buffering up to 1 MB
 constexpr size_t CTLSIZE = (4096);
 constexpr uint64_t cpu_to_gpu_index = 0;
@@ -36,10 +38,12 @@ constexpr uint64_t gpu_to_cpu_index = 8;
 #define CMD_HOSTAVX 1015
 #define CMD_DEVICELOOP 1016
 #define CMD_DEVICEMEMCPY 1017
+#define CMD_GPUTHREADS 1018
 /* option global variables */
-uint64_t glob_count = 0;
-uint64_t glob_readsize = 0;
-uint64_t glob_writesize = 0;
+// specify defaults
+uint64_t glob_count = 1;
+uint64_t glob_readsize = 32768;
+uint64_t glob_writesize = 32768;
 int glob_validate = 0;
 int glob_cputogpu = 0;
 int glob_gputocpu = 0;
@@ -53,6 +57,7 @@ int glob_hostmemcpy = 0;
 int glob_hostavx = 0;
 int glob_deviceloop = 0;
 int glob_devicememcpy = 0;
+uint64_t glob_gputhreads = 1;
 
 void Usage()
 {
@@ -95,6 +100,7 @@ void ProcessArgs(int argc, char **argv)
     {"hostavx", no_argument, nullptr, CMD_HOSTAVX},
     {"deviceloop", no_argument, nullptr, CMD_DEVICELOOP},
     {"devicememcpy", no_argument, nullptr, CMD_DEVICEMEMCPY},
+    {"gputhreads", required_argument, nullptr, CMD_GPUTHREADS},
     {nullptr, no_argument, nullptr, 0}
   };
   while (true)
@@ -194,11 +200,25 @@ void ProcessArgs(int argc, char **argv)
 	  glob_devicememcpy = true;
 	  break;
 	}
+	case CMD_GPUTHREADS: {
+	  glob_gputhreads = std::stoi(optarg);
+	  std::cout << "gputhreads " << glob_gputhreads << std::endl;
+	  break;
+	}
 
     };
     }
 }
 
+void printduration(const char* name, sycl::event e)
+  {
+    uint64_t start =
+      e.get_profiling_info<sycl::info::event_profiling::command_start>();
+    uint64_t end =
+      e.get_profiling_info<sycl::info::event_profiling::command_end>();
+    double duration = static_cast<double>(end - start) / NSEC_IN_SEC;
+    std::cout << name << " execution time: " << duration << " sec" << std::endl;
+  }
 
 void fillbuf(uint64_t *p, uint64_t size, int iter)
 {
@@ -259,10 +279,12 @@ int main(int argc, char *argv[]) {
   int loc_hostavx = glob_hostavx;
   int loc_deviceloop = glob_deviceloop;
   int loc_devicememcpy = glob_devicememcpy;
+  uint64_t loc_gputhreads = glob_gputhreads;
 
   if (loc_readsize > BUFSIZE/4) loc_readsize = BUFSIZE/4;
   if (loc_writesize > BUFSIZE/4) loc_writesize = BUFSIZE/4;
-  sycl::queue Q;
+  sycl::property_list prop_list{sycl::property::queue::enable_profiling()};
+  sycl::queue Q(sycl::gpu_selector{}, prop_list);
   std::cout<<"selected device : "<<Q.get_device().get_info<sycl::info::device::name>() << std::endl;
   std::cout<<"device vendor : "<<Q.get_device().get_info<sycl::info::device::vendor>() << std::endl;
 
@@ -353,6 +375,8 @@ int main(int argc, char *argv[]) {
       h.memcpy(device_mem, &host_data_array[0], BUFSIZE/2);
     });
   e.wait_and_throw();
+  printduration("memcpy kernel ", e);
+
   e = Q.submit([&](sycl::handler &h) {
       h.memcpy(device_cputogpu, &host_ctl_array[0], sizeof(uint64_t));
     });
@@ -380,10 +404,15 @@ int main(int argc, char *argv[]) {
     std::cout << "--count " << loc_count << " ";
     std::cout << "--read " << loc_readsize << " ";
     std::cout << "--write " << loc_writesize << " ";
+    std::cout << "--gputhreads " << loc_gputhreads << " ";
     std::cout << std::endl;    
   std::cout << "kernel going to launch" << std::endl;
   unsigned long start_time, end_time;
   struct timespec ts_start, ts_end;
+  uint64_t loc_globalsize = loc_readsize;
+  if (loc_writesize > loc_readsize) loc_globalsize = loc_writesize;
+  loc_globalsize /= sizeof(uint64_t);
+  uint64_t loc_loop = loc_globalsize / loc_gputhreads;
   if (loc_cputogpu) {
     // initialize the flag
     volatile uint64_t *c_to_g = host_cputogpu;
@@ -393,7 +422,7 @@ int main(int argc, char *argv[]) {
     e = Q.submit([&](sycl::handler &h) {
 	//   sycl::stream os(1024, 128, h);
 	//h.single_task([=]() {
-	h.parallel_for(sycl::nd_range<1>{{1}, {1}}, [=](sycl::nd_item<1> idx) {
+	h.parallel_for_work_group(sycl::range(1), sycl::range(loc_gputhreads), [=](sycl::group<1> grp) {
 	    //  os<<"kernel start\n";
 	    uint64_t prev = (uint64_t) -1L;
 	    sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> cpu_to_gpu(device_cputogpu[0]);
@@ -417,9 +446,11 @@ int main(int argc, char *argv[]) {
 		  memcpy(extra_device_mem, p, loc_readsize);
 		}
 	        if (loc_deviceloop) {
-		  for (int j = 0; j < loc_readsize >> 3; j += 1) {
-		    extra_device_mem[j] = p[j];
-		  }
+		  grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
+		      int j = it.get_global_id()[0];
+		      for (int k = j * loc_loop; k < (j+1) * loc_loop; k += 1)
+			extra_device_mem[k] = p[k];
+		    });
 		}
 	      }
 	      if (loc_validate) {
@@ -428,8 +459,7 @@ int main(int argc, char *argv[]) {
 	      gpu_to_cpu.store((err << 32) + i);
 	    } while (i < (loc_count-1) );
 	    // os<<"kernel exit\n";
-	  }
-	  );
+	  });
       });
     std::cout<<"kernel launched" << std::endl;
     { // start of host block for cputogpu
@@ -493,7 +523,7 @@ int main(int argc, char *argv[]) {
     e = Q.submit([&](sycl::handler &h) {
 	//   sycl::stream os(1024, 128, h);
 	//h.single_task([=]() {
-	h.parallel_for(sycl::nd_range<1>{{1}, {1}}, [=](sycl::nd_item<1> idx) {
+	h.parallel_for_work_group(sycl::range(1), sycl::range(loc_gputhreads), [=](sycl::group<1> grp) {
 	    //  os<<"kernel start\n";
 	    sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> cpu_to_gpu(device_cputogpu[0]);
 	    sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> gpu_to_cpu(device_gputocpu[0]);
@@ -516,9 +546,11 @@ int main(int argc, char *argv[]) {
 		  memcpy(p, extra_device_mem, loc_writesize);
 		}
 	        if (loc_deviceloop) {
-		  for (int j = 0; j < loc_writesize >> 3; j += 1) {
-		    p[j] = extra_device_mem[j];
-		  }
+		  grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
+		      int j = it.get_global_id()[0];
+		      for (int k = j * loc_loop; k < (j+1) * loc_loop; k += 1)
+			p[k] = extra_device_mem[k];
+		    });
 		}
 	      }
 	      for (;;) {
@@ -574,6 +606,7 @@ int main(int argc, char *argv[]) {
     }  // end of host block for gputocpu
     e.wait_and_throw();
   }
+  printduration("gpu kernel ", e);
     /* common cleanup */
     double elapsed = ((double) (ts_end.tv_sec - ts_start.tv_sec)) * 1000000000.0 +
 	((double) (ts_end.tv_nsec - ts_start.tv_nsec));
@@ -597,6 +630,7 @@ int main(int argc, char *argv[]) {
     std::cout << "--count " << loc_count << " ";
     std::cout << "--read " << loc_readsize << " ";
     std::cout << "--write " << loc_writesize << " ";
+    std::cout << "--gputhreads " << loc_gputhreads << " ";
 
     double mbps = (loc_readsize > loc_writesize) ? loc_readsize : loc_writesize;
     mbps = (mbps * 1000) / (elapsed / ((double) loc_count));
