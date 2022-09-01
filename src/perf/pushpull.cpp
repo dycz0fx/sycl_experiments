@@ -12,6 +12,8 @@
 #include <sys/stat.h>
 #include <immintrin.h>
 
+constexpr int use_atomic_flag = 1;
+
 #define NSEC_IN_SEC 1000000000.0
 
 constexpr size_t BUFSIZE = (1L << 21);  //allocate 2 MB, to permit double buffering up to 1 MB
@@ -417,6 +419,8 @@ int main(int argc, char *argv[]) {
     // initialize the flag
     volatile uint64_t *c_to_g = host_cputogpu;
     volatile uint64_t *g_to_c = host_gputocpu;
+    volatile uint64_t *d_c_to_g = device_cputogpu;
+    volatile uint64_t *d_g_to_c = device_gputocpu;
     *c_to_g = -1L;  /* initial non-value */
     *g_to_c = -1L;  /* initial non-value */
     e = Q.submit([&](sycl::handler &h) {
@@ -431,7 +435,11 @@ int main(int argc, char *argv[]) {
 	    do {
 	      uint64_t err = 0;
 	      for (;;) {
-		i = cpu_to_gpu.load();
+		if (use_atomic_flag) {
+		  i = cpu_to_gpu.load();
+		} else {
+		  i = *d_c_to_g;
+		}
 		if (i != prev) break;
 	      }
 	      prev = i;
@@ -456,7 +464,11 @@ int main(int argc, char *argv[]) {
 	      if (loc_validate) {
 		err = checkbuf(extra_device_mem, loc_readsize, i);
 	      }
-	      gpu_to_cpu.store((err << 32) + i);
+	      if (use_atomic_flag) {
+		gpu_to_cpu.store((err << 32) + i);
+	      } else {
+		*d_g_to_c = (err << 32) + i;
+	      }
 	    } while (i < (loc_count-1) );
 	    // os<<"kernel exit\n";
 	  });
@@ -517,6 +529,8 @@ int main(int argc, char *argv[]) {
     } else {  // gputocpu
       volatile uint64_t *c_to_g = host_cputogpu;
       volatile uint64_t *g_to_c = host_gputocpu;
+      volatile uint64_t *d_c_to_g = device_cputogpu;
+      volatile uint64_t *d_g_to_c = device_gputocpu;
       uint64_t prev = -1L;
       *g_to_c = prev;
       *c_to_g = prev;
@@ -525,14 +539,18 @@ int main(int argc, char *argv[]) {
 	//h.single_task([=]() {
 	h.parallel_for_work_group(sycl::range(1), sycl::range(loc_gputhreads), [=](sycl::group<1> grp) {
 	    //  os<<"kernel start\n";
-	    sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> cpu_to_gpu(device_cputogpu[0]);
-	    sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> gpu_to_cpu(device_gputocpu[0]);
+	    sycl::atomic_ref<uint64_t, sycl::memory_order::relaxed, sycl::memory_scope::system, sycl::access::address_space::global_space> cpu_to_gpu(device_cputogpu[0]);
+	    sycl::atomic_ref<uint64_t, sycl::memory_order::relaxed, sycl::memory_scope::system, sycl::access::address_space::global_space> gpu_to_cpu(device_gputocpu[0]);
 	    /* preload first message */
 	    fillbuf(extra_device_mem, loc_writesize, 0);
 	    memcpy(device_mem, extra_device_mem, loc_writesize);
 	    for (int i = 0; i < loc_count; i += 1) {
 	      uint64_t *p;
-	      gpu_to_cpu.store(i);
+	      if (use_atomic_flag) {
+		gpu_to_cpu.store(i);
+	      } else {
+		*d_g_to_c = i;
+	      }
 	      if (i & 1) {
 		p = &device_mem[0];
 	      } else {
@@ -554,7 +572,12 @@ int main(int argc, char *argv[]) {
 		}
 	      }
 	      for (;;) {
-		uint64_t temp = cpu_to_gpu.load();
+		uint64_t temp;
+		if (use_atomic_flag) {
+		  temp = cpu_to_gpu.load();
+		} else {
+		  temp = *d_c_to_g;
+		}
 		if (temp == i) break;
 	      }
 	    }

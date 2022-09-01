@@ -5,7 +5,7 @@ add_executable(mallocbug mallocbug.cpp)
 add_executable(host host.cpp)
 add_executable(host_mmap host_mmap.cpp)
 add_executable(pushpull pushpull.cpp)  
-add_executable(vecadd vecadd.cpp)  
+add_executable(vecadd vecadd.cpp)   
 add_executable(gpu_cpu_put_flags_lcs gpu_cpu_put_flags_lcs.cpp)
 
 set(SRUN srun)
