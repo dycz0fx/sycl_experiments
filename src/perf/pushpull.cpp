@@ -12,8 +12,6 @@
 #include <sys/stat.h>
 #include <immintrin.h>
 
-constexpr int use_atomic_flag_load = 0;
-constexpr int use_atomic_flag_store = 1;
 
 #define NSEC_IN_SEC 1000000000.0
 
@@ -42,6 +40,8 @@ constexpr uint64_t gpu_to_cpu_index = 8;
 #define CMD_DEVICELOOP 1016
 #define CMD_DEVICEMEMCPY 1017
 #define CMD_GPUTHREADS 1018
+#define CMD_ATOMICSTORE 1019
+#define CMD_ATOMICLOAD 1020
 /* option global variables */
 // specify defaults
 uint64_t glob_count = 1;
@@ -61,6 +61,8 @@ int glob_hostavx = 0;
 int glob_deviceloop = 0;
 int glob_devicememcpy = 0;
 uint64_t glob_gputhreads = 1;
+int glob_use_atomic_load = 0;
+int glob_use_atomic_store = 0;
 
 void Usage()
 {
@@ -74,7 +76,8 @@ void Usage()
     "--devicedata | --hostdata location of data buffer\n"
     "--devicectl | --hostctl | --splitctl    location of control flags\n"
     "--hostloop | --hostmemcpy | --hostavx   code for host\n"
-    "--deviceloop | --devicememcpy           code for device\n";
+    "--deviceloop | --devicememcpy           code for device\n"
+    "--atomicload=0/1 | --useatomicstore=0/1         method of flag access on device\n";
   std::cout << std::endl;
   exit(1);
 }
@@ -104,6 +107,8 @@ void ProcessArgs(int argc, char **argv)
     {"deviceloop", no_argument, nullptr, CMD_DEVICELOOP},
     {"devicememcpy", no_argument, nullptr, CMD_DEVICEMEMCPY},
     {"gputhreads", required_argument, nullptr, CMD_GPUTHREADS},
+    {"atomicload", required_argument, nullptr, CMD_ATOMICLOAD},
+    {"atomicstore", required_argument, nullptr, CMD_ATOMICSTORE},
     {nullptr, no_argument, nullptr, 0}
   };
   while (true)
@@ -208,6 +213,16 @@ void ProcessArgs(int argc, char **argv)
 	  std::cout << "gputhreads " << glob_gputhreads << std::endl;
 	  break;
 	}
+	case CMD_ATOMICSTORE: {
+	  glob_use_atomic_store = std::stoi(optarg);
+	  std::cout << "atomicstore " << glob_use_atomic_store << std::endl;
+	  break;
+	}
+	case CMD_ATOMICLOAD: {
+	  glob_use_atomic_load = std::stoi(optarg);
+	  std::cout << "atomicload " << glob_use_atomic_load << std::endl;
+	  break;
+	}
 
     };
     }
@@ -283,6 +298,8 @@ int main(int argc, char *argv[]) {
   int loc_deviceloop = glob_deviceloop;
   int loc_devicememcpy = glob_devicememcpy;
   uint64_t loc_gputhreads = glob_gputhreads;
+  int loc_use_atomic_load = glob_use_atomic_load;
+  int loc_use_atomic_store = glob_use_atomic_store;
 
   if (loc_readsize > BUFSIZE/4) loc_readsize = BUFSIZE/4;
   if (loc_writesize > BUFSIZE/4) loc_writesize = BUFSIZE/4;
@@ -422,7 +439,7 @@ int main(int argc, char *argv[]) {
 	    do {
 	      uint64_t err = 0;
 	      for (;;) {
-		if (use_atomic_flag_load) {
+		if (loc_use_atomic_load) {
 		  i = cpu_to_gpu.load();
 		} else {
 		  sycl::atomic_fence(sycl::memory_order::acq_rel, sycl::memory_scope::system);
@@ -452,7 +469,7 @@ int main(int argc, char *argv[]) {
 		  err = checkbuf(extra_device_mem, loc_readsize, i);
 		}
 	      }
-	      if (use_atomic_flag_store) {
+	      if (loc_use_atomic_store) {
 		gpu_to_cpu.store((err << 32) + i);
 	      } else {
 		*device_gputocpu = (err << 32) + i;
@@ -495,6 +512,7 @@ int main(int argc, char *argv[]) {
 	    }
 	  }
 	  if (loc_hostavx) {
+	    #pragma omp parallel for
 	    for (int j = 0; j < loc_writesize>>3; j += 8) {
 	      __m512i temp = _mm512_load_epi32((void *) &host_data_array[j]);
 	      _mm512_store_si512((void *) &p[j], temp);
@@ -531,7 +549,7 @@ int main(int argc, char *argv[]) {
 	    memcpy(device_mem, extra_device_mem, loc_writesize);
 	    for (int i = 0; i < loc_count; i += 1) {
 	      uint64_t *p;
-	      if (use_atomic_flag_store) {
+	      if (loc_use_atomic_store) {
 		gpu_to_cpu.store(i);
 	      } else {
 		*device_gputocpu = i;
@@ -559,7 +577,7 @@ int main(int argc, char *argv[]) {
 	      }
 	      for (;;) {
 		uint64_t temp;
-		if (use_atomic_flag_load) {
+		if (loc_use_atomic_load) {
 		  temp = cpu_to_gpu.load();
 		} else {
 		  sycl::atomic_fence(sycl::memory_order::acq_rel, sycl::memory_scope::system);
@@ -599,6 +617,7 @@ int main(int argc, char *argv[]) {
 	    }
 	  }
 	  if (loc_hostavx) {
+	    #pragma omp parallel for
 	    for (int j = 0; j < loc_readsize>>3; j += 8) {
 	      __m512i temp = _mm512_load_epi32((void *) (&p[j]));
 	      _mm512_store_si512((void *) &host_data_array[j], temp);
