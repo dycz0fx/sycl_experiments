@@ -38,7 +38,7 @@ void dbprintf(int line, const char *format, ...)
 #define CMD_VALIDATE 1005
 #define CMD_ATOMICSTORE 1019
 #define CMD_ATOMICLOAD 1020
-
+#define CMD_LATENCY 1021
 
 /* option global variables */
 // specify defaults
@@ -48,6 +48,7 @@ int glob_validate = 0;
 
 int glob_use_atomic_load = 0;
 int glob_use_atomic_store = 0;
+int glob_latency = 0;
 
 void Usage()
 {
@@ -73,6 +74,7 @@ void ProcessArgs(int argc, char **argv)
     {"validate", no_argument, nullptr, CMD_VALIDATE},
     {"atomicload", required_argument, nullptr, CMD_ATOMICLOAD},
     {"atomicstore", required_argument, nullptr, CMD_ATOMICSTORE},
+    {"latency", required_argument, nullptr, CMD_LATENCY},
     {nullptr, no_argument, nullptr, 0}
   };
   while (true)
@@ -110,15 +112,22 @@ void ProcessArgs(int argc, char **argv)
 	  std::cout << "atomicload " << glob_use_atomic_load << std::endl;
 	  break;
 	}
+	case CMD_LATENCY: {
+	  glob_latency = std::stoi(optarg);
+	  std::cout << "latency " << glob_latency << std::endl;
+	  break;
+	}
 
     };
     }
 }
 
+
+constexpr size_t BUFSIZE = (1L << 20);  //allocate 1 MB usable
+
 constexpr int N = 1024;
 constexpr int NOP_THRESHOLD = 256;   /* N/4 ? See analysis */
 
-constexpr size_t BUFSIZE = (1L << 20);  //allocate 1 MB usable
 
 /* message types, all non-zero */
 #define MSG_IDLE 0
@@ -203,7 +212,9 @@ int ring_internal_send_nop_p(struct RingState *s)
 void ring_process_message(struct RingState *s, struct RingMessage *msg)
 {
   if (DEBUG) printf("process %s %d (credit %d\n)\n", s->name, s->total_receive, s->peer_next_receive);
+  if (msg->header != MSG_NOP) {
     s->total_receive += 1;
+  }
   /* do what the message says */
 }
 
@@ -285,7 +296,14 @@ void *GPUThread(void *arg)
   std::cout << "thread starting" << std::endl;
   for (int i = 0; i < glob_count; i += 1) {
     msgdata[1] = i;
-    ring_cpu_send(s, MSG_NOP, glob_size, msgdata);
+    ring_cpu_send(s, MSG_PUT, glob_size, msgdata);
+    //printf ("%s %d\n", s->name, i);
+    if (glob_latency) {
+      while (s->total_receive != (i+1)) {
+	cpu_relax();
+	ring_cpu_poll(s);
+      }
+    }
   }
   ring_cpu_drain(s);
   return(NULL);
@@ -298,6 +316,7 @@ int main(int argc, char *argv[]) {
   int loc_validate = glob_validate;
   int loc_use_atomic_load = glob_use_atomic_load;
   int loc_use_atomic_store = glob_use_atomic_store;
+  int loc_latency = glob_latency;
 
 
   // allocate device memory
