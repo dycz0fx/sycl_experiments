@@ -26,7 +26,7 @@ void dbprintf(int line, const char *format, ...)
 #define DP(...) if (DEBUG) dbprintf(__LINE__, __VA_ARGS__)
 
 #define HERE()
-#define HERE2() if (DEBUG) std::cout << __FUNCTION__ << ": " << __LINE__ << std::endl; 
+#define CHERE() if (DEBUG) std::cout << __FUNCTION__ << ": " << __LINE__ << std::endl; 
 
 #define NSEC_IN_SEC 1000000000.0
 /* how many messages per buffer */
@@ -80,10 +80,10 @@ void processmessage(struct Message *msg)
 
 void cpureceive(struct State *s)
 {
-  HERE();
-  struct Message *msg = &(s->recvbuf[s->next_receive]);
+  CHERE();
+  volatile struct Message *msg = &(s->recvbuf[s->next_receive]);
   if (msg->header != MSG_IDLE) {
-    processmessage(msg);
+    processmessage((struct Message *) msg);
     msg->header = 0;
     s->peer_last_received = msg->last_received;
     s->next_receive = (s->next_receive + 1) % N;
@@ -92,7 +92,7 @@ void cpureceive(struct State *s)
 
 void cpusend(struct State *s, int type, int length, void *data)
 {
-  HERE();
+  CHERE();
   while (spaceavailable(s) == 0) cpureceive(s);
   struct Message msg;  // local composition of message
   msg.header = type;
@@ -100,14 +100,15 @@ void cpusend(struct State *s, int type, int length, void *data)
   assert (length <= MaxData);
   memcpy(&msg.data, data, length);  // local copy
   __m512i temp = _mm512_load_epi32((void *) &msg);
-  _mm512_store_si512((void *) &(s->sendbuf[s->next_send]), temp);
+  void *mp = (void *) &(s->sendbuf[s->next_send]);
+  _mm512_store_si512(mp, temp);
 	      //  _movdir64b(&(s->sendbuf[s->next_send]), &msg);   // send message (atomic!)
   s->next_send = (s->next_send + 1) % N;
 }
 
 void cpudrain(struct State *s)
 {
-  HERE();
+  CHERE();
   while (spaceavailable(s) < (N-1)) cpureceive(s);
 }
 
@@ -265,6 +266,7 @@ T *get_mmap_address(T * device_ptr, size_t size, sycl::queue Q) {
     return (T*)base;
 }
 
+constexpr int cpuonly = 1;
 
 int main(int argc, char *argv[]) {
   ProcessArgs(argc, argv);
@@ -275,7 +277,7 @@ int main(int argc, char *argv[]) {
   int loc_use_atomic_store = glob_use_atomic_store;
 
   sycl::property_list prop_list{sycl::property::queue::enable_profiling()};
-  sycl::queue Q(sycl::cpu_selector{}, prop_list);
+  sycl::queue Q(sycl::gpu_selector{}, prop_list);
   std::cout<<"selected device : "<<Q.get_device().get_info<sycl::info::device::name>() << std::endl;
   std::cout<<"device vendor : "<<Q.get_device().get_info<sycl::info::device::vendor>() << std::endl;
 
