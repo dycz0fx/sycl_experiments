@@ -30,7 +30,8 @@ void dbprintf(int line, const char *format, ...)
 
 /* option global variables */
 // specify defaults
-uint64_t glob_count = 1;
+uint64_t glob_cpu_to_gpu_count = 0;
+uint64_t glob_gpu_to_cpu_count = 0;
 uint64_t glob_size = 0;
 int glob_validate = 0;
 
@@ -82,12 +83,15 @@ struct RingState {
   int32_t peer_next_receive_sent; // last time next_receive was sent
   struct RingMessage *sendbuf;   // remote buffer
   struct RingMessage *recvbuf;   // local buffer
-  int32_t total_receive;     // for accounting
-  int32_t count;             // avoid global ref to glob_count
+  int32_t total_received;     // for accounting
+  int32_t total_sent;
+  int32_t total_nop;
+  int32_t send_count;
+  int32_t recv_count;
   const char *name;
 };
 
-void initstate(struct RingState *s, struct RingMessage *sendbuf, struct RingMessage *recvbuf, int count, const char *name)
+void initstate(struct RingState *s, struct RingMessage *sendbuf, struct RingMessage *recvbuf, int send_count, int recv_count, const char *name)
 {
   s->next_send = 0;
   s->next_receive = 0;
@@ -95,7 +99,11 @@ void initstate(struct RingState *s, struct RingMessage *sendbuf, struct RingMess
   s->peer_next_receive_sent = 0;
   s->sendbuf = sendbuf;
   s->recvbuf = recvbuf;
-  s->total_receive = 0;
+  s->total_received = 0;
+  s->total_sent = 0;
+  s->total_nop = 0;
+  s->send_count = send_count;
+  s->recv_count = recv_count;
   s->name = name;
 }
 
@@ -124,9 +132,9 @@ int ring_send_space_available(struct RingState *s)
  */
 void ring_cpu_process_message(struct RingState *s, struct RingMessage *msg)
 {
-  if (DEBUG) printf("process %s %d (credit %d\n)\n", s->name, s->total_receive, s->peer_next_receive);
+  if (DEBUG) printf("process %s %d (credit %d\n)\n", s->name, s->total_received, s->peer_next_receive);
   if (msg->header != MSG_NOP) {
-    s->total_receive += 1;
+    s->total_received += 1;
   }
   /* do what the message says */
 }
@@ -157,7 +165,7 @@ void ring_cpu_send_nop(struct RingState *s)
   _mm512_store_si512(mp, temp);
   //  _movdir64b(&(s->sendbuf[s->next_send]), &msg);   // send message (atomic!)
   s->next_send = (s->next_send + 1) % N;
-  
+  s->total_nop += 1;
 }
 
 int ring_internal_cpu_send_nop_p(struct RingState *s)
@@ -175,7 +183,6 @@ void ring_cpu_poll(struct RingState *s)
     ring_cpu_process_message(s, (struct RingMessage *) msg);
     msg->header = MSG_IDLE;
     s->next_receive = (s->next_receive + 1) % N;
-    s->peer_next_receive_sent = s->next_receive;
     if (ring_internal_cpu_send_nop_p(s)) ring_cpu_send_nop(s);
   }
 }
@@ -197,12 +204,13 @@ void ring_cpu_send(struct RingState *s, int type, int length, void *data)
   _mm512_store_si512(mp, temp);
   //  _movdir64b(&(s->sendbuf[s->next_send]), &msg);   // send message (atomic!)
   s->next_send = (s->next_send + 1) % N;
+  s->total_sent += 1;
 }
 
 void ring_cpu_drain(struct RingState *s)
 {
   CHERE(s->name);
-  while (s->total_receive < s->count) ring_cpu_poll(s);
+  while (s->total_received < s->recv_count) ring_cpu_poll(s);
 }
 
 
@@ -214,7 +222,7 @@ void ring_cpu_drain(struct RingState *s)
 void ring_gpu_process_message(struct RingState *s, struct RingMessage *msg)
 {
   if (msg->header != MSG_NOP) {
-    s->total_receive += 1;
+    s->total_received += 1;
   }
   /* do what the message says */
 }
@@ -262,7 +270,6 @@ void ring_gpu_poll(struct RingState *s)
     ring_gpu_process_message(s, (struct RingMessage *) msg);
     msg->header = MSG_IDLE;
     s->next_receive = (s->next_receive + 1) % N;
-    s->peer_next_receive_sent = s->next_receive;
     if (ring_internal_gpu_send_nop_p(s)) ring_gpu_send_nop(s);
   }
 }
@@ -287,15 +294,16 @@ void ring_gpu_send(struct RingState *s, int type, int length, void *data)
 
 void ring_gpu_drain(struct RingState *s)
 {
-  while (s->total_receive < s->count) ring_gpu_poll(s);
+  while (s->total_received < s->recv_count) ring_gpu_poll(s);
 }
 
 #define cpu_relax() asm volatile("rep; nop")
 #define nullptr NULL
 
 /* option codes */
-#define CMD_COUNT 1001
-#define CMD_SIZE 1002
+#define CMD_CPU_TO_GPU_COUNT 1001
+#define CMD_GPU_TO_CPU_COUNT 1002
+#define CMD_SIZE 1003
 #define CMD_HELP 1004
 #define CMD_VALIDATE 1005
 #define CMD_ATOMICSTORE 1019
@@ -306,7 +314,8 @@ void ring_gpu_drain(struct RingState *s)
 void Usage()
 {
   std::cout <<
-    "--count <n>            set number of iterations\n"
+    "--cpu_to_gpu_count <n>            set number of iterations\n"
+    "--gpu_to_cpu_count <n>            set number of iterations\n"
     "--size <n>             set size\n"
     "--help                 usage message\n"
     "--validate             set and check data\n"
@@ -321,7 +330,8 @@ void ProcessArgs(int argc, char **argv)
 {
   const char* short_opts = "c:r:w:vhDHALM";
   const option long_opts[] = {
-    {"count", required_argument, nullptr, CMD_COUNT},
+    {"cputogpucount", required_argument, nullptr, CMD_CPU_TO_GPU_COUNT},
+    {"gputocpucount", required_argument, nullptr, CMD_GPU_TO_CPU_COUNT},
     {"size", required_argument, nullptr, CMD_SIZE},
     {"help", no_argument, nullptr, CMD_HELP},
     {"validate", no_argument, nullptr, CMD_VALIDATE},
@@ -337,9 +347,14 @@ void ProcessArgs(int argc, char **argv)
 	break;
       switch (opt)
 	{
-	case CMD_COUNT: {
-	  glob_count = std::stoi(optarg);
-	  std::cout << "count " << glob_count << std::endl;
+	  case CMD_CPU_TO_GPU_COUNT: {
+	  glob_cpu_to_gpu_count = std::stoi(optarg);
+	  std::cout << "cputogpucount " << glob_cpu_to_gpu_count << std::endl;
+	  break;
+	}
+	  case CMD_GPU_TO_CPU_COUNT: {
+	  glob_gpu_to_cpu_count = std::stoi(optarg);
+	  std::cout << "gputocpucount " << glob_gpu_to_cpu_count << std::endl;
 	  break;
 	}
 	case CMD_SIZE: {
@@ -413,9 +428,15 @@ T *get_mmap_address(T * device_ptr, size_t size, sycl::queue Q) {
 
 constexpr int cpuonly = 1;
 
+void printstats(struct RingState *s)
+{
+  std::cout << s->name << " sent " << s->total_nop << " recv " << s->total_sent << " nop " << s->total_nop << std::endl;
+}
+
 int main(int argc, char *argv[]) {
   ProcessArgs(argc, argv);
-  uint64_t loc_count = glob_count;
+  uint64_t loc_cpu_to_gpu_count = glob_cpu_to_gpu_count;
+  uint64_t loc_gpu_to_cpu_count = glob_gpu_to_cpu_count;
   uint64_t loc_size = glob_size;
   int loc_validate = glob_validate;
   int loc_use_atomic_load = glob_use_atomic_load;
@@ -439,6 +460,8 @@ int main(int argc, char *argv[]) {
   sycl::context ctx = Q.get_context();
 
   struct RingMessage *device_data_hostmap;   // pointer for host to use
+
+
   device_data_hostmap = get_mmap_address(device_data_mem, BUFSIZE, Q);
 
   // initialize host mamory
@@ -461,10 +484,10 @@ int main(int argc, char *argv[]) {
       h.memcpy(gpu, cpu, sizeof(struct RingState));
     });
   e.wait_and_throw();
-  initstate(cpu, device_data_hostmap, host_data_mem, loc_count, "cpu");
+  initstate(cpu, device_data_hostmap, host_data_mem, loc_cpu_to_gpu_count, loc_gpu_to_cpu_count, "cpu");
   e = Q.submit([&](sycl::handler &h) {
       h.parallel_for_work_group(sycl::range(1), sycl::range(1), [=](sycl::group<1> grp) {
-	  initstate(gpu, host_data_mem, device_data_mem, loc_count, "gpu");
+	  initstate(gpu, host_data_mem, device_data_mem, loc_gpu_to_cpu_count, loc_cpu_to_gpu_count, "gpu");
 	});
     });
   e.wait_and_throw();
@@ -480,11 +503,11 @@ int main(int argc, char *argv[]) {
   e = Q.submit([&](sycl::handler &h) {
       h.parallel_for_work_group(sycl::range(1), sycl::range(1), [=](sycl::group<1> grp) {
 	  uint64_t msgdata[7] = {0xdeadbeef, 0, 0, 0, 0, 0, 0};
-	  for (int i = 0; i < loc_count; i += 1) {
+	  for (int i = 0; i < gpu->send_count; i += 1) {
 	    msgdata[1] = i;
 	    ring_gpu_send(gpu, MSG_NOP, loc_size, msgdata);
  	    if (loc_latency) {
-	      while (gpu->total_receive != (i+1)) {
+	      while (gpu->total_received != (i+1)) {
 		ring_gpu_poll(gpu);
 	      }
 	    }
@@ -495,11 +518,11 @@ int main(int argc, char *argv[]) {
 
     {  // cpu code
       uint64_t msgdata[7] = {0xfeedface, 0, 0, 0, 0, 0, 0};
-      for (int i = 0; i < loc_count; i += 1) {
+      for (int i = 0; i < cpu->send_count; i += 1) {
 	msgdata[1] = i;
 	ring_cpu_send(cpu, MSG_NOP, loc_size, msgdata);
 	if (loc_latency) {
-	  while (cpu->total_receive != (i+1)) {
+	  while (cpu->total_received != (i+1)) {
 	    cpu_relax();
 	    ring_cpu_poll(cpu);
 	  }
@@ -515,15 +538,24 @@ int main(int argc, char *argv[]) {
     /* common cleanup */
     double elapsed = ((double) (ts_end.tv_sec - ts_start.tv_sec)) * 1000000000.0 +
 	((double) (ts_end.tv_nsec - ts_start.tv_nsec));
-    //      std::cout << "count " << loc_count << " tsc each " << (end_time - start_time) / loc_count << std::endl;
-    std::cout << argv[0];
-    std::cout << "--count " << loc_count << " ";
-    std::cout << "--size " << loc_size << " ";
 
+    double fcount;
+    if (loc_cpu_to_gpu_count > loc_gpu_to_cpu_count)
+      fcount = loc_cpu_to_gpu_count;
+    else
+      fcount = loc_gpu_to_cpu_count;
     double size = loc_size;
-    double mbps = (size * 1000) / (elapsed / ((double) loc_count));
-    double nsec = elapsed / ((double) loc_count);
-    std::cout << " nsec each " << nsec << " MB/s " << mbps << std::endl;
+    double mbps = (size * 1000) / (elapsed / fcount);
+    double nsec = elapsed / fcount;
+
+    std::cout << "elapsed " << elapsed << " fcount " << fcount << std::endl;
+    std::cout << argv[0];
+    std::cout << "--gpu_to_cpu_count " << loc_gpu_to_cpu_count << " ";
+    std::cout << "--cpu_to_gpu_count " << loc_cpu_to_gpu_count << " ";
+    std::cout << "--size " << loc_size << " ";
+    std::cout << "  each " << nsec << " nsec " << mbps << "MB/s" << std::endl;
+    printstats(cpu);
+    printstats(gpu);
 
     munmap(device_data_hostmap, BUFSIZE);
     sycl::free(device_data_mem, Q);
