@@ -12,7 +12,6 @@ add_executable(pushpull pushpull.cpp)
 add_executable(vecadd vecadd.cpp)    
 add_executable(atomicref atomicref.cpp)     
 add_executable(simplering simplering.cpp)      
-add_executable(simpleringcpu simpleringcpu.cpp)      
 add_executable(gpu_cpu_put_flags_lcs gpu_cpu_put_flags_lcs.cpp)
 
 set(SRUN srun)
