@@ -12,6 +12,54 @@
 #include <sys/stat.h>
 #include <immintrin.h>
 
+// ############################
+// copied from https://github.com/intel/intel-graphics-compiler/blob/master/IGC/BiFModule/Implementation/IGCBiF_Intrinsics_Lsc.cl#L90
+// Load message caching control
+enum LSC_LDCC {
+    LSC_LDCC_DEFAULT      = 0,
+    LSC_LDCC_L1UC_L3UC    = 1,   // Override to L1 uncached and L3 uncached
+    LSC_LDCC_L1UC_L3C     = 2,   // Override to L1 uncached and L3 cached
+    LSC_LDCC_L1C_L3UC     = 3,   // Override to L1 cached and L3 uncached
+    LSC_LDCC_L1C_L3C      = 4,   // Override to L1 cached and L3 cached
+    LSC_LDCC_L1S_L3UC     = 5,   // Override to L1 streaming load and L3 uncached
+    LSC_LDCC_L1S_L3C      = 6,   // Override to L1 streaming load and L3 cached
+    LSC_LDCC_L1IAR_L3C    = 7,   // Override to L1 invalidate-after-read, and L3 cached
+};
+//#include <IGCBiF_Intrinsics_Lsc.cl>
+//
+enum LSC_STCC {
+    LSC_STCC_DEFAULT      = 0,
+    LSC_STCC_L1UC_L3UC    = 1,   // Override to L1 uncached and L3 uncached
+    LSC_STCC_L1UC_L3WB    = 2,   // Override to L1 uncached and L3 written back
+    LSC_STCC_L1WT_L3UC    = 3,   // Override to L1 written through and L3 uncached
+    LSC_STCC_L1WT_L3WB    = 4,   // Override to L1 written through and L3 written back
+    LSC_STCC_L1S_L3UC     = 5,   // Override to L1 streaming and L3 uncached
+    LSC_STCC_L1S_L3WB     = 6,   // Override to L1 streaming and L3 written back
+    LSC_STCC_L1WB_L3WB    = 7,   // Override to L1 written through and L3 written back
+};
+#ifdef __SYCL_DEVICE_ONLY__
+SYCL_EXTERNAL extern "C" void  __builtin_IB_lsc_store_block_global_ulong (ulong  *base, int immElemOff, ulong  val, enum LSC_STCC cacheOpt); //D64V1
+
+SYCL_EXTERNAL extern "C" ulong   __builtin_IB_lsc_load_global_ulong (ulong  *base, int immElemOff, enum LSC_LDCC cacheOpt); //D64V1
+
+
+
+#endif
+static inline void block_store(ulong  *base, int immElemOff, ulong  val)
+{
+#ifdef __SYCL_DEVICE_ONLY__
+#if 0
+  __builtin_IB_lsc_store_block_global_ulong (base, immElemOff, val, LSC_STCC_L1UC_L3UC);
+  //__builtin_IB_lsc_load_global_ulong (base, immElemOff, LSC_LDCC_L1UC_L3UC);
+#else
+  *base = val;
+  val = *((volatile ulong *) base);
+#endif
+#else
+  *base = val;
+#endif
+}
+// ############################
 
 #define NSEC_IN_SEC 1000000000.0
 
@@ -330,7 +378,18 @@ int main(int argc, char *argv[]) {
   std::array<uint64_t, CTLSIZE> host_ctl_array;
   memset(&host_ctl_array[0], 0, CTLSIZE);
  
-  uint64_t * host_ctl_mem = (uint64_t *) sycl::aligned_alloc_host(4096, CTLSIZE, Q);
+  //uint64_t * host_ctl_mem = (uint64_t *) sycl::aligned_alloc_host(4096, CTLSIZE, Q);
+  ze_host_mem_alloc_desc_t host_desc;
+  host_desc.stype = ZE_STRUCTURE_TYPE_HOST_MEM_ALLOC_DESC;
+  host_desc.pNext = NULL;
+  host_desc.flags = ZE_HOST_MEM_ALLOC_FLAG_BIAS_UNCACHED;
+  uint64_t *host_ctl_mem;
+  ze_result_t ret = zeMemAllocHost(sycl::get_native<sycl::backend::ext_oneapi_level_zero>(Q.get_context()), &host_desc, (size_t) CTLSIZE, (size_t) 4096, (void **) &host_ctl_mem);
+  if (ret != ZE_RESULT_SUCCESS) {
+    std::cout << "zeMemAllocHost returns " << ret << std::endl;
+    exit(1);
+  }
+
   std::cout << " host_ctl_mem " << host_ctl_mem << std::endl;
   memset(&host_ctl_mem[0], 0, CTLSIZE);
 
@@ -442,7 +501,7 @@ int main(int argc, char *argv[]) {
 		if (loc_use_atomic_load) {
 		  i = cpu_to_gpu.load();
 		} else {
-		  sycl::atomic_fence(sycl::memory_order::acq_rel, sycl::memory_scope::system);
+		  sycl::atomic_fence(sycl::memory_order::acquire, sycl::memory_scope::system);
 		  i = *device_cputogpu;
 		}
 		if (i != prev) break;
@@ -472,8 +531,9 @@ int main(int argc, char *argv[]) {
 	      if (loc_use_atomic_store) {
 		gpu_to_cpu.store((err << 32) + i);
 	      } else {
-		*device_gputocpu = (err << 32) + i;
-		sycl::atomic_fence(sycl::memory_order::acq_rel, sycl::memory_scope::system);
+		block_store((ulong *) device_gputocpu, 0, (ulong) (err << 32) + i);
+		//*device_gputocpu = (err << 32) + i;
+		//sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system);
 	      }
 	    } while (i < (loc_count-1) );
 	    // os<<"kernel exit\n";
@@ -552,8 +612,9 @@ int main(int argc, char *argv[]) {
 	      if (loc_use_atomic_store) {
 		gpu_to_cpu.store(i);
 	      } else {
-		*device_gputocpu = i;
-		sycl::atomic_fence(sycl::memory_order::acq_rel, sycl::memory_scope::system);
+		//*device_gputocpu = i;
+		block_store((ulong *) device_gputocpu, 0, (ulong) i);
+		//sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system);
 	      }
 	      if (loc_writesize > 0) {  // write the next message 
 		if (i & 1) {
@@ -580,7 +641,7 @@ int main(int argc, char *argv[]) {
 		if (loc_use_atomic_load) {
 		  temp = cpu_to_gpu.load();
 		} else {
-		  sycl::atomic_fence(sycl::memory_order::acq_rel, sycl::memory_scope::system);
+		  sycl::atomic_fence(sycl::memory_order::acquire, sycl::memory_scope::system);
 		  temp = *device_cputogpu;
 		}
 		if (temp == i) break;
