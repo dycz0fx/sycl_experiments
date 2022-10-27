@@ -38,7 +38,7 @@ enum LSC_STCC {
     LSC_STCC_L1WB_L3WB    = 7,   // Override to L1 written through and L3 written back
 };
 #ifdef __SYCL_DEVICE_ONLY__
-SYCL_EXTERNAL extern "C" void  __builtin_IB_lsc_store_block_global_ulong (ulong  *base, int immElemOff, ulong  val, enum LSC_STCC cacheOpt); //D64V1
+SYCL_EXTERNAL extern "C" void  __builtin_IB_lsc_store_global_ulong (ulong  *base, int immElemOff, ulong  val, enum LSC_STCC cacheOpt); //D64V1
 
 SYCL_EXTERNAL extern "C" ulong   __builtin_IB_lsc_load_global_ulong (ulong  *base, int immElemOff, enum LSC_LDCC cacheOpt); //D64V1
 
@@ -49,11 +49,11 @@ static inline void block_store(ulong  *base, int immElemOff, ulong  val)
 {
 #ifdef __SYCL_DEVICE_ONLY__
 #if 0
-  __builtin_IB_lsc_store_block_global_ulong (base, immElemOff, val, LSC_STCC_L1UC_L3UC);
+  __builtin_IB_lsc_store_global_ulong (base, immElemOff, val, LSC_STCC_L1UC_L3UC);
   //__builtin_IB_lsc_load_global_ulong (base, immElemOff, LSC_LDCC_L1UC_L3UC);
 #else
   *base = val;
-  val = *((volatile ulong *) base);
+  //val = *((volatile ulong *) base);
 #endif
 #else
   *base = val;
@@ -533,7 +533,7 @@ int main(int argc, char *argv[]) {
 	      } else {
 		block_store((ulong *) device_gputocpu, 0, (ulong) (err << 32) + i);
 		//*device_gputocpu = (err << 32) + i;
-		//sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system);
+		sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system);
 	      }
 	    } while (i < (loc_count-1) );
 	    // os<<"kernel exit\n";
@@ -614,7 +614,7 @@ int main(int argc, char *argv[]) {
 	      } else {
 		//*device_gputocpu = i;
 		block_store((ulong *) device_gputocpu, 0, (ulong) i);
-		//sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system);
+		sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system);
 	      }
 	      if (loc_writesize > 0) {  // write the next message 
 		if (i & 1) {

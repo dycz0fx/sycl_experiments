@@ -9,9 +9,24 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <immintrin.h>
+#include <chrono>
 
 constexpr size_t CTLSIZE = (4096);
+constexpr double NSEC_IN_SEC = 1000000000.0;
 
+#ifdef __SYCL_DEVICE_ONLY__
+extern "C" {
+  SYCL_EXTERNAL ulong intel_get_cycle_counter() __attribute__((overloadable));
+}
+
+ulong get_cycle_counter() {
+  return intel_get_cycle_counter();
+}
+#else
+ulong get_cycle_counter() {
+  return 0xDEADBEEF;
+}
+#endif // __SYCL_DEVICE_ONLY__
 
 template<typename T>
 T *get_mmap_address(T * device_ptr, size_t size, sycl::queue Q) {
@@ -70,7 +85,7 @@ enum LSC_STCC {
     LSC_STCC_L1WB_L3WB    = 7,   // Override to L1 written through and L3 written back
 };
 #ifdef __SYCL_DEVICE_ONLY__
-SYCL_EXTERNAL extern "C" void  __builtin_IB_lsc_store_block_global_ulong (ulong  *base, int immElemOff, ulong  val, enum LSC_STCC cacheOpt); //D64V1
+SYCL_EXTERNAL extern "C" void  __builtin_IB_lsc_store_global_ulong (ulong  *base, int immElemOff, ulong  val, enum LSC_STCC cacheOpt); //D64V1
 
 SYCL_EXTERNAL extern "C" ulong   __builtin_IB_lsc_load_global_ulong (ulong  *base, int immElemOff, enum LSC_LDCC cacheOpt); //D64V1
 
@@ -81,7 +96,7 @@ static inline void block_store(ulong  *base, int immElemOff, ulong  val)
 {
 #ifdef __SYCL_DEVICE_ONLY__
 #if 1
-  __builtin_IB_lsc_store_block_global_ulong (base, immElemOff, val, LSC_STCC_L1UC_L3UC);
+  __builtin_IB_lsc_store_global_ulong (base, immElemOff, val, LSC_STCC_L1UC_L3UC);
   //__builtin_IB_lsc_load_global_ulong (base, immElemOff, LSC_LDCC_L1UC_L3UC);
 #else
   *base = val;
@@ -106,13 +121,30 @@ static inline ulong block_load(ulong  *base, int immElemOff)
 #endif
   return(v);
 }
+
+void printduration(const char* name, sycl::event e)
+  {
+    uint64_t start =
+      e.get_profiling_info<sycl::info::event_profiling::command_start>();
+    uint64_t end =
+      e.get_profiling_info<sycl::info::event_profiling::command_end>();
+    double duration = static_cast<double>(end - start) / NSEC_IN_SEC;
+    std::cout << name << " execution time: " << duration << " sec" << std::endl;
+  }
+
+
 // ############################
 
 int main(int argc, char *argv[]) {
+  unsigned long start_host_time, end_host_time;
+  unsigned long start_device_time, end_device_time;
+  struct timespec ts_start, ts_end;
   sycl::property_list prop_list{sycl::property::queue::enable_profiling()};
   sycl::queue Q(sycl::gpu_selector{}, prop_list);
   std::cout<<"selected device : "<<Q.get_device().get_info<sycl::info::device::name>() << std::endl;
   std::cout<<"device vendor : "<<Q.get_device().get_info<sycl::info::device::vendor>() << std::endl;
+  uint device_frequency = (uint)Q.get_device().get_info<sycl::info::device::max_clock_frequency>();
+  std::cout << "device frequency " << device_frequency << std::endl;
   // the *2 is for an old bug that is probably fixed
   uint64_t * host_mem = (uint64_t *) sycl::aligned_alloc_host(4096, CTLSIZE*2, Q);
   uint64_t * device_mem = (uint64_t *) sycl::aligned_alloc_device(4096, CTLSIZE*2, Q);
@@ -178,12 +210,17 @@ int main(int argc, char *argv[]) {
       h.parallel_for_work_group(sycl::range(1), sycl::range(1), [=](sycl::group<1> grp) {
 	  sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> cpu_to_gpu(device_set_flag[0]);
 	  sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> gpu_to_cpu(device_poll_flag[0]);
+	  unsigned long lstart_device_time, lend_device_time;
+	  lstart_device_time = get_cycle_counter();
 	  for (int i = 0; i < iter; i += 1) {
 	    if (tocpumode == 0) *device_set_flag = i;
 	    else if (tocpumode == 1) gpu_to_cpu.store(i);
 	    else if (tocpumode == 2) block_store(device_set_flag, 0, i);
+	    sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system);
+	    int timeout = 0;
 	    for (;;) {
 	      uint64_t val;
+	      sycl::atomic_fence(sycl::memory_order::acquire, sycl::memory_scope::system);
 	      if (togpumode == 0) {
 		val = *device_poll_flag;
 	      } else if (togpumode == 1) {
@@ -191,20 +228,39 @@ int main(int argc, char *argv[]) {
 	      } else if (togpumode == 2) {
 		val = block_load(device_poll_flag, 0);
 	      }
+	      //	      if (timeout > 1000000) break;
+	      if (timeout < 1000000) timeout += 1;
 	      if (val == i) break;
 	    }
 	  }
+	  lend_device_time = get_cycle_counter();
+	  host_mem[16] = lstart_device_time;
+	  host_mem[24] = lend_device_time;
 	});
       });
   std::cout<<"kernel launched" << std::endl;
   // cpu part
+  clock_gettime(CLOCK_REALTIME, &ts_start);
+  start_host_time = rdtsc();
   for (int i = 0; i < iter; i += 1) {
     while (*host_poll_flag != i);
-    std::cout << "got " << i << std::endl;
+    //    std::cout << "got " << i << std::endl;
     *host_set_flag = i;
     _mm_sfence();
   }
+  end_host_time = rdtsc();
+  clock_gettime(CLOCK_REALTIME, &ts_end);
+  double elapsed = ((double) (ts_end.tv_sec - ts_start.tv_sec)) * NSEC_IN_SEC
+    + 
+	((double) (ts_end.tv_nsec - ts_start.tv_nsec));
+  std::cout << "iter " << iter << " nsed each " << elapsed / iter << std::endl;
   e.wait_and_throw();
+  start_device_time = host_mem[16];
+  end_device_time = host_mem[24];
+  printduration("gpu kernel ", e);
+  std::cout << "rdtsc per iteration :" << (end_host_time - start_host_time) / iter << std::endl;
+  std::cout << "device clock per iteration :" << (end_device_time - start_device_time) / iter << std::endl;
+    /* common cleanup */
   std::cout<<"kernel returned" << std::endl;
   return 0;
 }
