@@ -18,6 +18,7 @@ add_executable(storeflush storeflush.cpp)
 #add_executable(globaltest globaltest.cpp)         
 add_executable(multigpu multigpu.cpp)         
 add_executable(gpu_cpu_put_flags_lcs gpu_cpu_put_flags_lcs.cpp)
+add_executable(igc_memcpy igc_memcpy.cpp)        
 
 set(SRUN srun)
 add_test(NAME host_test COMMAND ${SRUN} ./host)
