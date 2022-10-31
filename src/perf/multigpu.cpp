@@ -290,48 +290,66 @@ int main(int argc, char *argv[]) {
     }
   }
 #endif
-  // size is in bytes
-  for (size_t size = 8; size < BUFSIZE; size <<= 1) {
-    int maxthreads = size/8;
-    if (maxthreads > 1024) maxthreads = 1024;
-    for (int threads = 1; threads <= maxthreads; threads <<= 1) {
-      // locloop is in uint64_t
-      uint64_t loc_loop = (size/8) / threads;
-      double duration;
-      int count;
-      // run for more and more counts until it takes more than 0.1 sec
-      for (count = 1; count < (1 << 20); count <<= 1) {
-	uint64_t *s = device_src[1];
-	uint64_t *d = device_dest[0];
-	clock_gettime(CLOCK_REALTIME, &ts_start);
-	auto e = qs[0].submit([&](sycl::handler &h) {
-	    h.parallel_for_work_group(sycl::range(1), sycl::range(threads), [=](sycl::group<1> grp) {
-		grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
-		    int j = it.get_global_id()[0];
-		    for (int iter = 0; iter < count; iter += 1) {
-		      for (int k = j * loc_loop; k < (j+1) * loc_loop; k += 1)
-			d[k] = s[k];
-		    }
-		  });
-		sycl::atomic_fence(sycl::memory_order::acquire, sycl::memory_scope::system);
-	      });
-	  });
-	e.wait_and_throw();
-	clock_gettime(CLOCK_REALTIME, &ts_end);
-	duration = ((double) (ts_end.tv_sec - ts_start.tv_sec)) * 1000000000.0 +
-	  ((double) (ts_end.tv_nsec - ts_start.tv_nsec));
-	duration /= 1000000000.0;
-	if (duration > 0.1) {
-	  break;
+  for (int mode = 0; mode < 3; mode += 1) {
+    uint64_t *s, *d;
+    switch (mode) {
+    case 0:  // push
+      s = device_src[0];
+      d = device_dest[1];
+      break;
+    case 1:  // pull
+      s = device_src[1];
+      d = device_dest[0];
+      break;
+    case 2:  // same
+      s = device_src[0];
+      d = device_dest[0];
+      break;
+    default:
+      assert(0);
+    }
+    printf("csv, mode, size, threads,  count, duration, bandwidth MB/s\n");
+    // size is in bytes
+    for (size_t size = 8; size < BUFSIZE; size <<= 1) {
+      int maxthreads = size/8;
+      if (maxthreads > 1024) maxthreads = 1024;
+      for (int threads = 1; threads <= maxthreads; threads <<= 1) {
+	// locloop is in uint64_t
+	uint64_t loc_loop = (size/8) / threads;
+	double duration;
+	int count;
+	// run for more and more counts until it takes more than 0.1 sec
+	for (count = 1; count < (1 << 20); count <<= 1) {
+	  clock_gettime(CLOCK_REALTIME, &ts_start);
+	  auto e = qs[0].submit([&](sycl::handler &h) {
+	      h.parallel_for_work_group(sycl::range(1), sycl::range(threads), [=](sycl::group<1> grp) {
+		  grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
+		      int j = it.get_global_id()[0];
+		      for (int iter = 0; iter < count; iter += 1) {
+			for (int k = j * loc_loop; k < (j+1) * loc_loop; k += 1) {
+			  d[k] = s[k];
+			}
+			sycl::atomic_fence(sycl::memory_order::acquire, sycl::memory_scope::system);
+		      }
+		    });
+		});
+	    });
+	  e.wait_and_throw();
+	  clock_gettime(CLOCK_REALTIME, &ts_end);
+	  duration = ((double) (ts_end.tv_sec - ts_start.tv_sec)) * 1000000000.0 +
+	    ((double) (ts_end.tv_nsec - ts_start.tv_nsec));
+	  duration /= 1000000000.0;
+	  if (duration > 0.1) {
+	    break;
+	  }
 	}
+	double per_iter = duration / count;
+	double bw = size / (per_iter);
+	double bw_mb = bw / 1000000.0;
+	printf("csv, %d, %ld, %d, %d, %f, %f\n", mode, size, threads, count, per_iter, bw_mb);
       }
-      double per_iter = duration / count;
-      double bw = size / (per_iter);
-      double bw_mb = bw / 1000000.0;
-      printf("size %ld threads %d count %d duration %f bandwidth %f MB/s\n", size, threads, count, per_iter, bw_mb);
     }
   }
-  
       
   std::cout<<"kernel returned" << std::endl;
   return 0;
