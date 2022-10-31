@@ -85,98 +85,60 @@ SYCL_EXTERNAL extern "C" void  __builtin_IB_lsc_store_global_ulong8 (ulong8  *ba
 
 SYCL_EXTERNAL extern "C" ulong8   __builtin_IB_lsc_load_global_ulong8 (ulong8  *base, int immElemOff, enum LSC_LDCC cacheOpt); //D64V1
 
-
-
 #endif
 
-static inline void block_store(ulong  *base, ulong  val)
-{
-#ifdef __SYCL_DEVICE_ONLY__
-  __builtin_IB_lsc_store_global_ulong (base, 0, val, LSC_STCC_L1UC_L3UC);
-#else
-  *base = val;
-#endif
-}
-
-static inline ulong block_load(ulong  *base)
+static inline void block_copy(ulong  *d, ulong *s)
 {
   ulong v;
 #ifdef __SYCL_DEVICE_ONLY__
-  v = __builtin_IB_lsc_load_global_ulong (base, 0, LSC_LDCC_L1UC_L3UC);
+  v = __builtin_IB_lsc_load_global_ulong (s, 0, LSC_LDCC_L1UC_L3UC);
+  __builtin_IB_lsc_store_global_ulong (d, 0, v, LSC_STCC_L1UC_L3UC);
 #else
-  v = *base;
+  v = *s;
+  *d = v;
 #endif
-  return(v);
 }
 
 // vector 2
 
-static inline void block_store2(ulong2  *base, ulong2  val)
-{
-#ifdef __SYCL_DEVICE_ONLY__
-  __builtin_IB_lsc_store_global_ulong2 (base, 0, val, LSC_STCC_L1UC_L3UC);
-#else
-  *base = val;
-#endif
-}
-
-static inline ulong2 block_load2(ulong2  *base)
+static inline void block_copy2(ulong2  *d, ulong2 *s)
 {
   ulong2 v;
 #ifdef __SYCL_DEVICE_ONLY__
-  v = __builtin_IB_lsc_load_global_ulong2 (base, 0, LSC_LDCC_L1UC_L3UC);
+  v = __builtin_IB_lsc_load_global_ulong2 (s, 0, LSC_LDCC_L1UC_L3UC);
+  __builtin_IB_lsc_store_global_ulong2 (d, 0, v, LSC_STCC_L1UC_L3UC);
 #else
-  v = *base;
+  v = *s;
+  *d = v;
 #endif
-  return(v);
 }
-
 
 // vector 4
-
-static inline void block_store4(ulong4  *base, ulong4  val)
-{
-#ifdef __SYCL_DEVICE_ONLY__
-  __builtin_IB_lsc_store_global_ulong4 (base, 0, val, LSC_STCC_L1UC_L3UC);
-#else
-  *base = val;
-#endif
-}
-
-static inline ulong4 block_load4(ulong4  *base)
+static inline void block_copy4(ulong4  *d, ulong4 *s)
 {
   ulong4 v;
 #ifdef __SYCL_DEVICE_ONLY__
-  v = __builtin_IB_lsc_load_global_ulong4 (base, 0, LSC_LDCC_L1UC_L3UC);
+  v = __builtin_IB_lsc_load_global_ulong4 (s, 0, LSC_LDCC_L1UC_L3UC);
+  __builtin_IB_lsc_store_global_ulong4 (d, 0, v, LSC_STCC_L1UC_L3UC);
 #else
-  v = *base;
+  v = *s;
+  *d = v;
 #endif
-  return(v);
 }
 
 // vector 8
 
-static inline void block_store8(ulong8  *base, ulong8  val)
-{
-#ifdef __SYCL_DEVICE_ONLY__
-  __builtin_IB_lsc_store_global_ulong8 (base, 0, val, LSC_STCC_L1UC_L3UC);
-#else
-  *base = val;
-#endif
-}
-
-static inline ulong8 block_load8(ulong8  *base)
+static inline void block_copy8(ulong8  *d, ulong8 *s)
 {
   ulong8 v;
 #ifdef __SYCL_DEVICE_ONLY__
-  v = __builtin_IB_lsc_load_global_ulong8 (base, 0, LSC_LDCC_L1UC_L3UC);
+  v = __builtin_IB_lsc_load_global_ulong8 (s, 0, LSC_LDCC_L1UC_L3UC);
+  __builtin_IB_lsc_store_global_ulong8 (d, 0, v, LSC_STCC_L1UC_L3UC);
 #else
-  v = *base;
+  v = *s;
+  *d = v;
 #endif
-  return(v);
 }
-
-
 
 
 void printduration(const char* name, sycl::event e)
@@ -294,8 +256,7 @@ int main(int argc, char *argv[]) {
 		      grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
 			  int j = it.get_global_id()[0];
 			  for (int k = j * loc_loop; k < (j+1) * loc_loop; k += 1) {
-			    ulong v = block_load(&dev_src[k]);
-			    block_store(&dev_src[k], v);
+			    block_copy(&dev_dest[k], &dev_src[k]);
 			  }
 			  sycl::atomic_fence(sycl::memory_order::acquire, sycl::memory_scope::system);
 			});
@@ -310,8 +271,7 @@ int main(int argc, char *argv[]) {
 		      grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
 			  int j = it.get_global_id()[0];
 			  for (int k = j * loc_loop; k < (j+1) * loc_loop; k += 1) {
-			    ulong2 v = block_load2((ulong2 *) &dev_src[k]);
-			    block_store2((ulong2 *) &dev_src[k], v);
+			    block_copy2((ulong2 *) &dev_dest[k], (ulong2 *) &dev_src[k]);
 			  }
 			  sycl::atomic_fence(sycl::memory_order::acquire, sycl::memory_scope::system);
 			});
@@ -326,8 +286,7 @@ int main(int argc, char *argv[]) {
 		      grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
 			  int j = it.get_global_id()[0];
 			  for (int k = j * loc_loop; k < (j+1) * loc_loop; k += 1) {
-			    ulong4 v = block_load4((ulong4 *) &dev_src[k]);
-			    block_store4((ulong4 *) &dev_src[k], v);
+			    block_copy4((ulong4 *) &dev_dest[k], (ulong4 *) &dev_src[k]);
 			  }
 			  sycl::atomic_fence(sycl::memory_order::acquire, sycl::memory_scope::system);
 			});
@@ -342,8 +301,7 @@ int main(int argc, char *argv[]) {
 		      grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
 			  int j = it.get_global_id()[0];
 			  for (int k = j * loc_loop; k < (j+1) * loc_loop; k += 1) {
-			    ulong8 v = block_load8((ulong8 *) &dev_src[k]);
-			    block_store8((ulong8 *) &dev_src[k], v);
+			    block_copy8((ulong8 *) &dev_dest[k], (ulong8 *) &dev_src[k]);
 			  }
 			  sycl::atomic_fence(sycl::memory_order::acquire, sycl::memory_scope::system);
 			});
