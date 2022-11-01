@@ -1,0 +1,9 @@
+L. Stewart
+10/31/22
+srun multi_gpu >log
+grep csv log >new.csv
+python chart.py
+
+srun simd_memcpy >log
+grep csv log >simd5.csv
+python simd5.py
