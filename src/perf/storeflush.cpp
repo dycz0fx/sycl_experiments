@@ -89,9 +89,8 @@ SYCL_EXTERNAL extern "C" void  __builtin_IB_lsc_store_global_ulong (ulong  *base
 
 SYCL_EXTERNAL extern "C" ulong   __builtin_IB_lsc_load_global_ulong (ulong  *base, int immElemOff, enum LSC_LDCC cacheOpt); //D64V1
 
-
-
 #endif
+
 static inline void block_store(ulong  *base, int immElemOff, ulong  val)
 {
 #ifdef __SYCL_DEVICE_ONLY__
@@ -100,7 +99,7 @@ static inline void block_store(ulong  *base, int immElemOff, ulong  val)
   //__builtin_IB_lsc_load_global_ulong (base, immElemOff, LSC_LDCC_L1UC_L3UC);
 #else
   *base = val;
-  val = *((volatile ulong *) base);
+  #val = *((volatile ulong *) base);
 #endif
 #else
   *base = val;
@@ -208,20 +207,24 @@ int main(int argc, char *argv[]) {
   
   e = Q.submit([&](sycl::handler &h) {
       h.parallel_for_work_group(sycl::range(1), sycl::range(1), [=](sycl::group<1> grp) {
-	  sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> cpu_to_gpu(device_set_flag[0]);
-	  sycl::atomic_ref<uint64_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> gpu_to_cpu(device_poll_flag[0]);
+	  sycl::atomic_ref<ulong, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> cpu_to_gpu(device_set_flag[0]);
+	  sycl::atomic_ref<ulong, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> gpu_to_cpu(device_poll_flag[0]);
 	  unsigned long lstart_device_time, lend_device_time;
 	  lstart_device_time = get_cycle_counter();
 	  for (int i = 0; i < iter; i += 1) {
-	    if (tocpumode == 0) *device_set_flag = i;
+	    if (tocpumode == 0) {
+	      //*((volatile ulong *) device_set_flag) = i;
+	      *device_set_flag = i;
+	    }
 	    else if (tocpumode == 1) gpu_to_cpu.store(i);
-	    else if (tocpumode == 2) block_store(device_set_flag, 0, i);
+	    else if (tocpumode == 2) block_store((ulong *) device_set_flag, 0, i);
 	    sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system);
 	    int timeout = 0;
 	    for (;;) {
 	      uint64_t val;
 	      sycl::atomic_fence(sycl::memory_order::acquire, sycl::memory_scope::system);
 	      if (togpumode == 0) {
+		//val = *((volatile ulong *) device_poll_flag);
 		val = *device_poll_flag;
 	      } else if (togpumode == 1) {
 		val = cpu_to_gpu.load();
@@ -253,7 +256,8 @@ int main(int argc, char *argv[]) {
   double elapsed = ((double) (ts_end.tv_sec - ts_start.tv_sec)) * NSEC_IN_SEC
     + 
 	((double) (ts_end.tv_nsec - ts_start.tv_nsec));
-  std::cout << "iter " << iter << " nsed each " << elapsed / iter << std::endl;
+  printf("iter %d tocpuloc %d togpuloc %d tocpumode %d togpumode %d nsec %f\n",
+	 iter, tocpuloc, togpuloc, tocpumode, togpumode, elapsed / iter);
   e.wait_and_throw();
   start_device_time = host_mem[16];
   end_device_time = host_mem[24];
