@@ -11,7 +11,7 @@
 #include <immintrin.h>
 #include <chrono>
 
-constexpr size_t BUFSIZE = (1<<26);   // 64 MB
+constexpr size_t BUFSIZE = (1L << 32);   // 4 GB
 constexpr double NSEC_IN_SEC = 1000000000.0;
 
 #ifdef __SYCL_DEVICE_ONLY__
@@ -71,10 +71,19 @@ int main(int argc, char *argv[]) {
     auto devices = p.get_devices();
     for (auto & d : devices ) {
         std::cout << "**Device: " << d.get_info<sycl::info::device::name>() << std::endl;
-        if ( d.is_gpu() ) {
-            std::cout << "**Device is GPU - adding to vector of queues" << std::endl;
-            qs.push_back(sycl::queue(d, prop_list));
-        }
+	if (d.is_gpu()) {
+	  std::vector<sycl::device> sd = d.create_sub_devices<sycl::info::partition_property::partition_by_affinity_domain>(sycl::info::partition_affinity_domain::next_partitionable);
+	  std::cout << " subdevices " << sd.size() << std::endl;
+	          std::cout << "**max wg: " << d.get_info<cl::sycl::info::device::max_work_group_size>()  << std::endl;
+	  for (auto &subd: sd) {
+	    qs.push_back(sycl::queue(subd, prop_list));
+	  }
+	}
+	
+	//       if ( d.is_gpu() ) {
+        //    std::cout << "**Device is GPU - adding to vector of queues" << std::endl;
+        //    qs.push_back(sycl::queue(d, prop_list));
+	//}
     }
   }
 
@@ -119,7 +128,7 @@ int main(int argc, char *argv[]) {
   std::cout << " memory initialized " << std::endl;
 
   // Measure time for an empty kernel (with size 1)
-  printf("csv,mode,size,count,duration,bandwidth\n");
+  printf("csv,mode,size,sgsize,wgsize,count,duration,bandwidth\n");
     // size is in bytes
   for (int mode = 0; mode < 5; mode += 1) {
     ulong *s, *d;
@@ -148,39 +157,68 @@ int main(int argc, char *argv[]) {
     default:
       assert(0);
     }
-    for (size_t size = 1; size < BUFSIZE; size <<= 1) {
-      int iterations = size / sizeof(ulong);
-      double duration;
-      int count;
-      // run for more and more counts until it takes more than 0.1 sec
-      for (count = 1; count < (1 << 20); count <<= 1) {
-	clock_gettime(CLOCK_REALTIME, &ts_start);
-	for (int iter = 0; iter < count; iter += 1) {
-	  auto e = qs[0].submit([&](sycl::handler &h) {
-	      h.parallel_for(sycl::range(iterations), [=](sycl::id<1> idx) {
-		  d[idx] = s[idx];
+#define USE_PARALLEL_FOR_WORKGROUP 1
+    for (size_t size = 32; size < BUFSIZE; size <<= 1) {
+      size_t iterations = size / sizeof(ulong);
+#if  USE_PARALLEL_FOR
+      int max_wg_size = qs[0].get_device().get_info<cl::sycl::info::device::max_work_group_size>();
+#endif //! USE_PARALLEL_FOR
+#if USE_PARALLEL_FOR_WORKGROUP
+      int max_wg_size = 1024;
+#endif //! USE_PARALLEL_FOR_WORKGROUP
+      
+      for (int sg_size = 16; sg_size <= 32; sg_size <<= 1) {
+	for (int wg_size = sg_size; wg_size < max_wg_size; wg_size <<= 1) {
+	  double duration;
+	  int count;
+#if USE_PARALLEL_FOR_WORKGROUP
+	  size_t loc_loop = iterations / (sg_size * wg_size);
+#endif //! USE_PARALLEL_FOR_WORKGROUP
+
+	  printf("node size %ld sg_size %d wg_size %d\n", size, sg_size, wg_size);
+	  fflush(stdout);
+	  // run for more and more counts until it takes more than 0.1 sec
+	  for (count = 1; count < (1 << 20); count <<= 1) {
+	    clock_gettime(CLOCK_REALTIME, &ts_start);
+	    for (int iter = 0; iter < count; iter += 1) {
+	      auto e = qs[0].submit([&](sycl::handler &h) {
+#if USE_PARALLEL_FOR
+		  h.parallel_for(sycl::nd_range<1>(iterations, wg_size), [=](sycl::id<1> idx) [[intel::reqd_sub_group_size(32)]]{
+		      d[idx] = s[idx];
+		    });
+#endif //! USE_PARALLEL_FOR
+#if USE_PARALLEL_FOR_WORKGROUP
+		  h.parallel_for_work_group(sycl::range(1), sycl::range(wg_size), [=](sycl::group<1> grp) {
+		      grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
+			  int j = it.get_global_id()[0];
+			  for (int k = j * loc_loop; k < (j+1) * loc_loop; k += 1)
+			    d[k] = s[k];
+			});
+		    });
+#endif //! USE_PARALLEL_FOR_WORKGROUP
 		});
-	    });
-	  e.wait_and_throw();
-	}
-	// sequential
-	clock_gettime(CLOCK_REALTIME, &ts_end);
-	duration = ((double) (ts_end.tv_sec - ts_start.tv_sec)) * 1000000000.0 +
-	  ((double) (ts_end.tv_nsec - ts_start.tv_nsec));
-	
-	duration /= 1000000000.0;
-	if (duration > 0.1) {
-	  break;
+	      e.wait_and_throw();
+	    }
+	    // sequential
+	    clock_gettime(CLOCK_REALTIME, &ts_end);
+	    duration = ((double) (ts_end.tv_sec - ts_start.tv_sec)) * 1000000000.0 +
+	      ((double) (ts_end.tv_nsec - ts_start.tv_nsec));
+	    
+	    duration /= 1000000000.0;
+	    if (duration > 0.1) {
+	      break;
+	    }
+	  }
+	  double per_iter = duration / count;
+	  double bw = size / (per_iter);
+	  double bw_mb = bw / 1000000.0;
+	  printf("csv,%d,%ld,%d,%d,%d,%f,%f\n", mode, size, sg_size, wg_size, count, duration, bw_mb);
 	}
       }
-      double per_iter = duration / count;
-      double bw = size / (per_iter);
-      double bw_mb = bw / 1000000.0;
-      printf("csv,%d, %ld,%d,%f,%f\n", mode, size, count, duration, bw_mb);
     }
   }
   // check destination buffer
-  
+      
   std::cout<<"kernel returned" << std::endl;
   return 0;
 }
