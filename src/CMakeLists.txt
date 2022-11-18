@@ -11,7 +11,8 @@ add_executable(cpu_gpu_flow cpu_gpu_flow.cpp)
 add_executable(gpu_cpu_put_flags gpu_cpu_put_flags.cpp)
 
 add_subdirectory(mmap)
-add_subdirectory(perf)
+add_subdirectory(perf) 
+add_subdirectory(fft) 
 
 set(SRUN srun)
 add_test(NAME gpu_shmem_put_flags COMMAND ${SRUN} ./gpu_cpu_put_flags)
