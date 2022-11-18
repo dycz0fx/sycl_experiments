@@ -49,6 +49,51 @@ void printduration(const char* name, sycl::event e)
   }
 
 
+void runkernel_range(sycl::queue q, ulong *d, ulong *s, size_t size, int wg_size, int count)
+{
+  size_t iterations = size / sizeof(ulong);
+  for (int iter = 0; iter < count; iter += 1) {
+    auto e = q.submit([&](sycl::handler &h) {
+	h.parallel_for(sycl::range(iterations), [=](sycl::id<1> idx) {
+	    d[idx] = s[idx];
+	  });
+      });
+    e.wait_and_throw();
+  }
+}
+
+void runkernel_nd_range(sycl::queue q, ulong *d, ulong *s, size_t size, int wg_size, int count)
+{
+  size_t iterations = size / sizeof(ulong);
+  for (int iter = 0; iter < count; iter += 1) {
+    auto e = q.submit([&](sycl::handler &h) {
+	h.parallel_for(sycl::nd_range<1>(iterations, wg_size), [=](sycl::id<1> idx) [[intel::reqd_sub_group_size(32)]] {
+	    d[idx] = s[idx];
+	  });
+      });
+    e.wait_and_throw();
+  }
+}
+
+void runkernel_work_group(sycl::queue q, ulong *d, ulong *s, size_t size, int wg_size, int count)
+{
+  size_t iterations = size / sizeof(ulong);
+  size_t loc_loop = iterations / (wg_size);
+  for (int iter = 0; iter < count; iter += 1) {
+    auto e = q.submit([&](sycl::handler &h) {
+	h.parallel_for_work_group(sycl::range(1), sycl::range(wg_size), [=](sycl::group<1> grp) {
+	    grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
+		int j = it.get_global_id()[0];
+		for (int k = j * loc_loop; k < (j+1) * loc_loop; k += 1)
+		  d[k] = s[k];
+	      });
+	  });
+      });
+    e.wait_and_throw();
+  }
+}
+
+
 // ############################
 
 int main(int argc, char *argv[]) {
@@ -130,76 +175,60 @@ int main(int argc, char *argv[]) {
   // Measure time for an empty kernel (with size 1)
   printf("csv,mode,size,sgsize,wgsize,count,duration,bandwidth\n");
     // size is in bytes
-  for (int mode = 0; mode < 5; mode += 1) {
-    ulong *s, *d;
-    switch (mode) {
-    case 0:  // push
-      s = dev_src[0];
-      d = dev_dest[1];
-      break;
-    case 1:  // pull
-      s = dev_src[1];
-      d = dev_dest[0];
-      break;
-    case 2:  // same
-      s = dev_src[0];
-      d = dev_dest[2];
-      break;
-    case 3:  // pull
-      s = dev_src[2];
-      d = dev_dest[0];
-      break;
-    case 4:  // same
-      s = dev_src[0];
-      d = dev_dest[0];
-      break;
-     
-    default:
-      assert(0);
-    }
-#define USE_PARALLEL_FOR_WORKGROUP 1
-    for (size_t size = 32; size < BUFSIZE; size <<= 1) {
-      size_t iterations = size / sizeof(ulong);
-#if  USE_PARALLEL_FOR
+  #define PARALLEL_RANGE 0
+  #define PARALLEL_ND_RANGE 2
+  #define PARALLEL_WORK_GROUP 1
+  for (int cmd = 0; cmd < 3; cmd += 1) {
+    for (int mode = 0; mode < 5; mode += 1) {
+      ulong *s, *d;
+      switch (mode) {
+      case 0:  // push
+	s = dev_src[0];
+	d = dev_dest[1];
+	break;
+      case 1:  // pull
+	s = dev_src[1];
+	d = dev_dest[0];
+	break;
+      case 2:  // same
+	s = dev_src[0];
+	d = dev_dest[2];
+	break;
+      case 3:  // pull
+	s = dev_src[2];
+	d = dev_dest[0];
+	break;
+      case 4:  // same
+	s = dev_src[0];
+	d = dev_dest[0];
+	break;
+      default:
+	assert(0);
+      }
+      int min_wg_size = 1;
       int max_wg_size = qs[0].get_device().get_info<cl::sycl::info::device::max_work_group_size>();
-#endif //! USE_PARALLEL_FOR
-#if USE_PARALLEL_FOR_WORKGROUP
-      int max_wg_size = 1024;
-#endif //! USE_PARALLEL_FOR_WORKGROUP
-      
-      for (int sg_size = 16; sg_size <= 32; sg_size <<= 1) {
-	for (int wg_size = sg_size; wg_size < max_wg_size; wg_size <<= 1) {
+      if (cmd == PARALLEL_RANGE) {
+	min_wg_size = max_wg_size;
+      } else if (cmd == PARALLEL_ND_RANGE) {
+	min_wg_size = 32 ;
+      } else if (cmd == PARALLEL_WORK_GROUP) {
+	min_wg_size = 32 ;
+      }
+      for (size_t size = 32 * sizeof(ulong); size < BUFSIZE; size <<= 1) {
+	for (int wg_size = min_wg_size; wg_size <= max_wg_size; wg_size <<= 1) {
+
 	  double duration;
 	  int count;
-#if USE_PARALLEL_FOR_WORKGROUP
-	  size_t loc_loop = iterations / (sg_size * wg_size);
-#endif //! USE_PARALLEL_FOR_WORKGROUP
-
-	  printf("node size %ld sg_size %d wg_size %d\n", size, sg_size, wg_size);
-	  fflush(stdout);
 	  // run for more and more counts until it takes more than 0.1 sec
 	  for (count = 1; count < (1 << 20); count <<= 1) {
 	    clock_gettime(CLOCK_REALTIME, &ts_start);
-	    for (int iter = 0; iter < count; iter += 1) {
-	      auto e = qs[0].submit([&](sycl::handler &h) {
-#if USE_PARALLEL_FOR
-		  h.parallel_for(sycl::nd_range<1>(iterations, wg_size), [=](sycl::id<1> idx) [[intel::reqd_sub_group_size(32)]]{
-		      d[idx] = s[idx];
-		    });
-#endif //! USE_PARALLEL_FOR
-#if USE_PARALLEL_FOR_WORKGROUP
-		  h.parallel_for_work_group(sycl::range(1), sycl::range(wg_size), [=](sycl::group<1> grp) {
-		      grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
-			  int j = it.get_global_id()[0];
-			  for (int k = j * loc_loop; k < (j+1) * loc_loop; k += 1)
-			    d[k] = s[k];
-			});
-		    });
-#endif //! USE_PARALLEL_FOR_WORKGROUP
-		});
-	      e.wait_and_throw();
+	    if (cmd == PARALLEL_RANGE) {
+	      runkernel_range(qs[0], d, s, size, wg_size, count);
+	    } else if (cmd == PARALLEL_ND_RANGE) {
+	      runkernel_nd_range(qs[0], d, s, size, wg_size, count);
+	    } else if (cmd == PARALLEL_WORK_GROUP) {
+	      runkernel_work_group(qs[0], d, s, size, wg_size, count);
 	    }
-	    // sequential
 	    clock_gettime(CLOCK_REALTIME, &ts_end);
 	    duration = ((double) (ts_end.tv_sec - ts_start.tv_sec)) * 1000000000.0 +
 	      ((double) (ts_end.tv_nsec - ts_start.tv_nsec));
@@ -212,11 +241,13 @@ int main(int argc, char *argv[]) {
 	  double per_iter = duration / count;
 	  double bw = size / (per_iter);
 	  double bw_mb = bw / 1000000.0;
-	  printf("csv,%d,%ld,%d,%d,%d,%f,%f\n", mode, size, sg_size, wg_size, count, duration, bw_mb);
+	  int sg_size = 32;
+	  printf("csv,%d,%d,%ld,%d,%d,%d,%f,%f\n", cmd, mode, size, sg_size, wg_size, count, duration, bw_mb);
+	  fflush(stdout);
 	}
-      }
-    }
-  }
+      }  //! size
+    }  //! mode
+  }  //! cmd
   // check destination buffer
       
   std::cout<<"kernel returned" << std::endl;
