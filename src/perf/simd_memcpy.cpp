@@ -175,8 +175,8 @@ int main(int argc, char *argv[]) {
   // Measure time for an empty kernel (with size 1)
   printf("csv,mode,size,sgsize,wgsize,count,duration,bandwidth\n");
     // size is in bytes
-  #define PARALLEL_RANGE 0
-  #define PARALLEL_ND_RANGE 2
+  #define PARALLEL_RANGE 2
+  #define PARALLEL_ND_RANGE 0
   #define PARALLEL_WORK_GROUP 1
   for (int cmd = 0; cmd < 3; cmd += 1) {
     for (int mode = 0; mode < 5; mode += 1) {
@@ -207,16 +207,19 @@ int main(int argc, char *argv[]) {
       }
       int min_wg_size = 1;
       int max_wg_size = qs[0].get_device().get_info<cl::sycl::info::device::max_work_group_size>();
-      if (cmd == PARALLEL_RANGE) {
-	min_wg_size = max_wg_size;
-      } else if (cmd == PARALLEL_ND_RANGE) {
-	min_wg_size = 32 ;
-      } else if (cmd == PARALLEL_WORK_GROUP) {
-	min_wg_size = 32 ;
-      }
       for (size_t size = 32 * sizeof(ulong); size < BUFSIZE; size <<= 1) {
+	size_t iterations = size / sizeof(ulong);
+	if (cmd == PARALLEL_RANGE) {
+	  min_wg_size = max_wg_size;
+	} else if (cmd == PARALLEL_ND_RANGE) {
+	  min_wg_size = 1;
+	  if (max_wg_size > iterations) max_wg_size = iterations;
+	} else if (cmd == PARALLEL_WORK_GROUP) {
+	  min_wg_size = 32;
+	}
 	for (int wg_size = min_wg_size; wg_size <= max_wg_size; wg_size <<= 1) {
-
+	  printf("wg_size %ld size %ld size/8 %ld\n", wg_size, size, size/8);
+	  fflush(stdout);
 	  double duration;
 	  int count;
 	  // run for more and more counts until it takes more than 0.1 sec
