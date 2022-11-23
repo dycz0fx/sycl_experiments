@@ -1,7 +1,7 @@
 
 link_libraries(ze_loader)
-#add_compile_options(-march=sapphirerapids)
-add_compile_options(-mavx512f)   
+add_compile_options(-march=sapphirerapids)
+#add_compile_options(-mavx512f)   
 add_compile_options(-fopenmp)  
 add_compile_options(-fsycl-targets=spir64)   
 #add_compile_options(-mllvm)
@@ -21,6 +21,7 @@ add_executable(gpu_cpu_put_flags_lcs gpu_cpu_put_flags_lcs.cpp)
 add_executable(igc_memcpy igc_memcpy.cpp)        
 add_executable(simd_memcpy simd_memcpy.cpp)        
 add_executable(simple_memcpy simple_memcpy.cpp) 
+add_executable(builtintest builtintest.cpp) 
 #add_executable(esimd_memcpy esimd_memcpy.cpp)
 
 set(SRUN srun)
