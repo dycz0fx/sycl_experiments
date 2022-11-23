@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <immintrin.h>
 #include <chrono>
+#include "uncached.cpp"
 
 constexpr size_t CTLSIZE = (4096);
 constexpr double NSEC_IN_SEC = 1000000000.0;
@@ -59,67 +60,6 @@ T *get_mmap_address(T * device_ptr, size_t size, sycl::queue Q) {
  *   togpuloc 0 = device, 1 = host
  *   mode  0 = pointer, 1 = atomic, 2 = uncached
  */
-// ############################
-// copied from https://github.com/intel/intel-graphics-compiler/blob/master/IGC/BiFModule/Implementation/IGCBiF_Intrinsics_Lsc.cl#L90
-// Load message caching control
-enum LSC_LDCC {
-    LSC_LDCC_DEFAULT      = 0,
-    LSC_LDCC_L1UC_L3UC    = 1,   // Override to L1 uncached and L3 uncached
-    LSC_LDCC_L1UC_L3C     = 2,   // Override to L1 uncached and L3 cached
-    LSC_LDCC_L1C_L3UC     = 3,   // Override to L1 cached and L3 uncached
-    LSC_LDCC_L1C_L3C      = 4,   // Override to L1 cached and L3 cached
-    LSC_LDCC_L1S_L3UC     = 5,   // Override to L1 streaming load and L3 uncached
-    LSC_LDCC_L1S_L3C      = 6,   // Override to L1 streaming load and L3 cached
-    LSC_LDCC_L1IAR_L3C    = 7,   // Override to L1 invalidate-after-read, and L3 cached
-};
-//#include <IGCBiF_Intrinsics_Lsc.cl>
-//
-enum LSC_STCC {
-    LSC_STCC_DEFAULT      = 0,
-    LSC_STCC_L1UC_L3UC    = 1,   // Override to L1 uncached and L3 uncached
-    LSC_STCC_L1UC_L3WB    = 2,   // Override to L1 uncached and L3 written back
-    LSC_STCC_L1WT_L3UC    = 3,   // Override to L1 written through and L3 uncached
-    LSC_STCC_L1WT_L3WB    = 4,   // Override to L1 written through and L3 written back
-    LSC_STCC_L1S_L3UC     = 5,   // Override to L1 streaming and L3 uncached
-    LSC_STCC_L1S_L3WB     = 6,   // Override to L1 streaming and L3 written back
-    LSC_STCC_L1WB_L3WB    = 7,   // Override to L1 written through and L3 written back
-};
-#ifdef __SYCL_DEVICE_ONLY__
-SYCL_EXTERNAL extern "C" void  __builtin_IB_lsc_store_global_ulong (ulong  *base, int immElemOff, ulong  val, enum LSC_STCC cacheOpt); //D64V1
-
-SYCL_EXTERNAL extern "C" ulong   __builtin_IB_lsc_load_global_ulong (ulong  *base, int immElemOff, enum LSC_LDCC cacheOpt); //D64V1
-
-#endif
-
-static inline void block_store(ulong  *base, int immElemOff, ulong  val)
-{
-#ifdef __SYCL_DEVICE_ONLY__
-#if 1
-  __builtin_IB_lsc_store_global_ulong (base, immElemOff, val, LSC_STCC_L1UC_L3UC);
-  //__builtin_IB_lsc_load_global_ulong (base, immElemOff, LSC_LDCC_L1UC_L3UC);
-#else
-  *base = val;
-  #val = *((volatile ulong *) base);
-#endif
-#else
-  *base = val;
-#endif
-}
-
-static inline ulong block_load(ulong  *base, int immElemOff)
-{
-  ulong v;
-#ifdef __SYCL_DEVICE_ONLY__
-#if 1
-  v = __builtin_IB_lsc_load_global_ulong (base, immElemOff, LSC_LDCC_L1UC_L3UC);
-#else
-  v = *((volatile ulong *) base);
-#endif
-#else
-  v = *base;
-#endif
-  return(v);
-}
 
 void printduration(const char* name, sycl::event e)
   {
@@ -217,7 +157,7 @@ int main(int argc, char *argv[]) {
 	      *device_set_flag = i;
 	    }
 	    else if (tocpumode == 1) gpu_to_cpu.store(i);
-	    else if (tocpumode == 2) block_store((ulong *) device_set_flag, 0, i);
+	    else if (tocpumode == 2) ucs_ulong((ulong *) device_set_flag, i);
 	    sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system);
 	    int timeout = 0;
 	    for (;;) {
@@ -229,7 +169,7 @@ int main(int argc, char *argv[]) {
 	      } else if (togpumode == 1) {
 		val = cpu_to_gpu.load();
 	      } else if (togpumode == 2) {
-		val = block_load(device_poll_flag, 0);
+		val = ucl_ulong(device_poll_flag);
 	      }
 	      //	      if (timeout > 1000000) break;
 	      if (timeout < 1000000) timeout += 1;
