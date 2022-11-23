@@ -16,6 +16,7 @@
 #include <assert.h>
 #include <string.h>
 #include <malloc.h>
+#include "uncached.cpp"
 
 #define DEBUG 0
 void dbprintf(int line, const char *format, ...)
@@ -44,6 +45,8 @@ void dbprintf(int line, const char *format, ...)
 #define CMD_ATOMICSTORE 1019
 #define CMD_ATOMICLOAD 1020
 #define CMD_LATENCY 1021
+#define CMD_CPU_TO_GPU_BUF 1022
+#define CMD_GPU_TO_CPU_BUF 1023
 
 /* option global variables */
 // specify defaults
@@ -52,39 +55,44 @@ uint64_t glob_gpu_to_cpu_count = 0;
 uint64_t glob_size = 0;
 int glob_validate = 0;
 int glob_cpu = 0;
-
+int glob_interlock = 0;
 int glob_use_atomic_load = 0;
 int glob_use_atomic_store = 0;
 int glob_latency = 0;
+int glob_cpu_to_gpu_buf = 0;  /* 0 in host memory, 1 in gpu memory */
+int glob_gpu_to_cpu_buf = 0;  /* 0 in host memory, 1 in gpu memory */
 
 void Usage()
 {
   std::cout <<
-    "--cpu_to_gpu_count <n>            set number of iterations\n"
-    "--gpu_to_cpu_count <n>            set number of iterations\n"
+    "--cputogpubuf cpu|gpu          set location of cpu to gpu buffer\n"
+    "--gputocpubuf cpu|gpu          set location of gpu to cpu buffer\n"
+    "--cputogpucount <n>            set number of iterations\n"
+    "--gputocpucount <n>            set number of iterations\n"
     "--use_cpu              use cpu for both ends\n"
     "--size <n>             set size\n"
     "--help                 usage message\n"
     "--validate             set and check data\n"
-    "--atomicload=0/1 | --useatomicstore=0/1         method of flag access on device\n";
+    "--interlock            wait for responses\n"
+    "--atomicload=0/1 | --atomicstore=0/1         method of flag access on device\n";
   std::cout << std::endl;
   exit(1);
 }
-
-
 
 void ProcessArgs(int argc, char **argv)
 {
   const option long_opts[] = {
     {"cputogpucount", required_argument, nullptr, CMD_CPU_TO_GPU_COUNT},
     {"gputocpucount", required_argument, nullptr, CMD_GPU_TO_CPU_COUNT},
+    {"cputogpubuf", required_argument, nullptr, CMD_CPU_TO_GPU_BUF},
+    {"gputocpubuf", required_argument, nullptr, CMD_GPU_TO_CPU_BUF},
     {"size", required_argument, nullptr, CMD_SIZE},
     {"help", no_argument, nullptr, CMD_HELP},
     {"validate", no_argument, nullptr, CMD_VALIDATE},
     {"use_cpu", no_argument, nullptr, CMD_CPU},
     {"atomicload", required_argument, nullptr, CMD_ATOMICLOAD},
     {"atomicstore", required_argument, nullptr, CMD_ATOMICSTORE},
-    {"latency", required_argument, nullptr, CMD_LATENCY},
+    {"latency", no_argument, nullptr, CMD_LATENCY},
     {nullptr, no_argument, nullptr, 0}
   };
   while (true)
@@ -102,6 +110,24 @@ void ProcessArgs(int argc, char **argv)
 	  case CMD_GPU_TO_CPU_COUNT: {
 	  glob_gpu_to_cpu_count = std::stoi(optarg);
 	  std::cout << "gputocpucount " << glob_gpu_to_cpu_count << std::endl;
+	  break;
+	}
+	  case CMD_CPU_TO_GPU_BUF: {
+	    if (strcmp(optarg, "cpu") == 0)
+	      glob_cpu_to_gpu_buf = 0;
+	    else if (strcmp(optarg, "gpu") == 0)
+	      glob_cpu_to_gpu_buf = 1;
+	    else assert(0);
+	  std::cout << "cputogpubuf " << glob_cpu_to_gpu_buf << std::endl;
+	  break;
+	}
+	  case CMD_GPU_TO_CPU_BUF: {
+	    if (strcmp(optarg, "cpu") == 0)
+	      glob_gpu_to_cpu_buf = 0;
+	    else if (strcmp(optarg, "gpu") == 0)
+	      glob_gpu_to_cpu_buf = 1;
+	    else assert(0);
+	  std::cout << "gputocpubuf " << glob_cpu_to_gpu_buf << std::endl;
 	  break;
 	}
 	case CMD_SIZE: {
@@ -132,7 +158,7 @@ void ProcessArgs(int argc, char **argv)
 	  break;
 	}
 	case CMD_LATENCY: {
-	  glob_latency = std::stoi(optarg);
+	  glob_latency = 1;
 	  std::cout << "latency " << glob_latency << std::endl;
 	  break;
 	}
@@ -283,7 +309,7 @@ void ring_process_message(struct RingState *s, struct RingMessage *msg)
   /* do what the message says */
 }
 
-/* called by ring_cpu_send when we need space to send a message */
+/* called by ring_send when we need space to send a message */
 void ring_internal_cpu_receive(struct RingState *s)
 {
   /* volatile */ struct RingMessage *msg = &(s->recvbuf[s->next_receive]);
@@ -301,23 +327,29 @@ void send_nop(struct RingState *s)
   do {
     ring_internal_cpu_receive(s);
   } while (ring_send_space_available(s) == 0);
-  struct RingMessage msg;  // local composition of message
-  msg.header = MSG_NOP;
-  msg.next_receive = s->next_receive;
+  ulong8 msg;
+  struct RingMessage *msgp = (struct RingMessage *) &msg[0];  // local composition of message
+  msgp->header = MSG_NOP;
+  msgp->next_receive = s->next_receive;
   s->peer_next_receive_sent = s->next_receive;
   struct RingMessage *mp = &(s->sendbuf[s->next_send]);
-  /*
+#ifdef __SYCL_DEVICE_ONLY__
+  ucs_ulong8((ulong8 *) mp, msg);
+  #else
+  _movdir64b(mp, &msg);
+  #endif
+/*
   __m512i temp = _mm512_load_epi32((void *) &msg);
   _mm512_store_si512(mp, temp);
   */
-  *mp = msg;
+//  *mp = msg;
   //  _movdir64b(&(s->sendbuf[s->next_send]), &msg);   // send message (atomic!)
   s->next_send = (s->next_send + 1) % N;
   s->total_nop += 1;
 }
 
 /* called by users to see if any receives messages are available */
-void ring_cpu_poll(struct RingState *s)
+void ring_poll(struct RingState *s)
 {
   /* volatile */ struct RingMessage *msg = &(s->recvbuf[s->next_receive]);
   if (msg->header != MSG_IDLE) {
@@ -329,112 +361,41 @@ void ring_cpu_poll(struct RingState *s)
   }
 }
 
-void ring_cpu_send(struct RingState *s, int type, int length, void *data)
+void ring_send(struct RingState *s, int type, int length, void *data)
 {
   //  if (DEBUG) printf("send %s next %d\n", s->name, s->next_send);
   do {
     ring_internal_cpu_receive(s);
   } while (ring_send_space_available(s) == 0);
-  struct RingMessage msg;  // local composition of message
-  msg.header = type;
-  msg.next_receive = s->next_receive;
+  ulong8 msg;
+  struct RingMessage *msgp = (struct RingMessage *) &msg[0];  // local composition of message
+  msgp->header = type;
+  msgp->next_receive = s->next_receive;
   s->peer_next_receive_sent = s->next_receive;
   assert (length <= MaxData);
-  memcpy(&msg.data, data, length);  // local copy
+  memcpy(&msgp->data, data, length);  // local copy
   struct RingMessage *mp = &(s->sendbuf[s->next_send]);
+#ifdef __SYCL_DEVICE_ONLY__
+  ucs_ulong8((ulong8 *) mp, msg);
+  #else
+  _movdir64b(mp, &msg);
+  #endif
   /*
   __m512i temp = _mm512_load_epi32((void *) &msg);
   _mm512_store_si512(mp, temp);
   */
-  *mp = msg;
+  //*mp = msg;
   //  _movdir64b(&(s->sendbuf[s->next_send]), &msg);   // send message (atomic!)
   s->next_send = (s->next_send + 1) % N;
   s->total_sent += 1;
 }
 
-void ring_cpu_drain(struct RingState *s)
+void ring_drain(struct RingState *s)
 {
-  CHERE(s->name);
-  while (s->total_received < s->recv_count) ring_cpu_poll(s);
+  //CHERE(s->name);
+  while (s->total_received < s->recv_count) ring_poll(s);
 }
 
-void ring_gpu_process_message(struct RingState *s, struct RingMessage *msg)
-{
-  if (msg->header != MSG_NOP) {
-    s->total_received += 1;
-  }
-  /* do what the message says */
-}
-
-/* called by ring_cpu_send when we need space to send a message */
-void ring_internal_gpu_receive(struct RingState *s)
-{
-  /* volatile */ struct RingMessage *msg = &(s->recvbuf[s->next_receive]);
-  if (msg->header != MSG_IDLE) {
-    s->peer_next_receive = msg->next_receive;
-    ring_gpu_process_message(s, (struct RingMessage *) msg);
-    msg->header = MSG_IDLE;
-    s->next_receive = (s->next_receive + 1) % N;
-  }
-}
-
-
-void ring_gpu_send_nop(struct RingState *s)
-{
-  do {
-    ring_internal_gpu_receive(s);
-  } while (ring_send_space_available(s) == 0);
-  struct RingMessage msg;  // local composition of message
-  msg.header = MSG_NOP;
-  msg.next_receive = s->next_receive;
-  s->peer_next_receive_sent = s->next_receive;
-
-  s->sendbuf[s->next_send] = msg;  // how to do this?
-
-  //  _movdir64b(&(s->sendbuf[s->next_send]), &msg);   // send message (atomic!)
-  s->next_send = (s->next_send + 1) % N;
-}
-
-int ring_internal_gpu_send_nop_p(struct RingState *s)
-{
-  int cr_to_send =  (N + s->next_receive - s->peer_next_receive_sent) % N;
-  return (cr_to_send > NOP_THRESHOLD);
-}
-
-void ring_gpu_poll(struct RingState *s)
-{
-  /* volatile */ struct RingMessage *msg = &(s->recvbuf[s->next_receive]);
-  if (msg->header != MSG_IDLE) {
-    s->peer_next_receive = msg->next_receive;
-    ring_gpu_process_message(s, (struct RingMessage *) msg);
-    msg->header = MSG_IDLE;
-    s->next_receive = (s->next_receive + 1) % N;
-    if (ring_internal_gpu_send_nop_p(s)) ring_gpu_send_nop(s);
-  }
-}
-
-void ring_gpu_send(struct RingState *s, int type, int length, void *data)
-{
-  do {
-    ring_internal_gpu_receive(s);
-  } while (ring_send_space_available(s) == 0);
-  struct RingMessage msg;  // local composition of message
-  msg.header = type;
-  msg.next_receive = s->next_receive;
-  s->peer_next_receive_sent = s->next_receive;
-
-
-  assert (length <= MaxData);
-
-  memcpy(&msg.data, data, length);  // local copy
-  s->sendbuf[s->next_send] = msg;   // send message (atomic!)
-  s->next_send = (s->next_send + 1) % N;
-}
-
-void ring_gpu_drain(struct RingState *s)
-{
-  while (s->total_received < s->recv_count) ring_gpu_poll(s);
-}
 
 #define cpu_relax() asm volatile("rep; nop")
 #define nullptr NULL
@@ -446,16 +407,16 @@ void *GPUThread(void *arg)
   std::cout << "thread starting " << s->name << " send " << s->send_count << " recv " << s->recv_count << std::endl;
   for (int i = 0; i < s->send_count; i += 1) {
     msgdata[1] = i;
-    ring_cpu_send(s, MSG_PUT, glob_size, msgdata);
+    ring_send(s, MSG_PUT, glob_size, msgdata);
     //printf ("%s %d\n", s->name, i);
     if (glob_latency) {
-      while (s->total_received != (i+1)) {
+      while (s->total_received <= (i+1)) {
 	cpu_relax();
-	ring_cpu_poll(s);
+	ring_poll(s);
       }
     }
   }
-  ring_cpu_drain(s);
+  ring_drain(s);
   return(NULL);
 }
 
@@ -469,6 +430,8 @@ int main(int argc, char *argv[]) {
   ProcessArgs(argc, argv);
   uint64_t loc_cpu_to_gpu_count = glob_cpu_to_gpu_count;
   uint64_t loc_gpu_to_cpu_count = glob_gpu_to_cpu_count;
+  int loc_cpu_to_gpu_buf = glob_cpu_to_gpu_buf;
+  int loc_gpu_to_cpu_buf = glob_gpu_to_cpu_buf;
   uint64_t loc_size = glob_size;
   int loc_validate = glob_validate;
   int loc_use_atomic_load = glob_use_atomic_load;
@@ -491,22 +454,43 @@ int main(int argc, char *argv[]) {
   // allocate device memory
 
   struct RingMessage *device_data_mem;
-  device_data_mem = (struct RingMessage *) sycl::aligned_alloc_device(4096, BUFSIZE * 2, Q);
+  struct RingMessage *device_data_hostmap;   // pointer for host to use
+  if (loc_cpu_to_gpu_buf == 1) {
+    device_data_mem = (struct RingMessage *) sycl::aligned_alloc_device(4096, BUFSIZE * 2, Q);
+    if (loc_cpu) {
+      device_data_hostmap = device_data_mem;
+    } else {
+      device_data_hostmap = get_mmap_address(device_data_mem, BUFSIZE, Q);
+    }
+  } else {
+    device_data_mem = (struct RingMessage *) sycl::aligned_alloc_host(4096, BUFSIZE * 2, Q);
+    device_data_hostmap = device_data_mem;
+  }
+  std::cout << " device_data_mem " << device_data_mem << std::endl;
+  std::cout << " device_data_hostmap " << device_data_hostmap << std::endl;
 
   //allocate host mamory
-  struct RingMessage *host_data_mem = (struct RingMessage *) sycl::aligned_alloc_host(4096, BUFSIZE, Q);
-  std::cout << " host_data_mem " << host_data_mem << std::endl;
-
-
-  struct RingMessage *device_data_hostmap;   // pointer for host to use
-  if (loc_cpu) {
-    device_data_hostmap = device_data_mem;
+  struct RingMessage *host_data_mem;
+  struct RingMessage *host_data_hostmap;   // pointer for host to use
+  if (loc_gpu_to_cpu_buf == 1) {
+    host_data_mem = (struct RingMessage *) sycl::aligned_alloc_device(4096, BUFSIZE * 2, Q);
+    if (loc_cpu) {
+      host_data_hostmap = host_data_mem;
+    } else {
+      host_data_hostmap = get_mmap_address(host_data_mem, BUFSIZE, Q);
+    }
   } else {
-    device_data_hostmap = get_mmap_address(device_data_mem, BUFSIZE, Q);
+    host_data_mem = (struct RingMessage *) sycl::aligned_alloc_host(4096, BUFSIZE, Q);
+    host_data_hostmap = host_data_mem;
   }
+  std::cout << " host_data_mem " << host_data_mem << std::endl;
+  std::cout << " host_data_hostmap " << host_data_hostmap << std::endl;
+
+
+
 
   // initialize host mamory
-  memset(host_data_mem, 0, BUFSIZE);
+  memset(host_data_hostmap, 0, BUFSIZE);
 
   // initialize device memory
   //memset(device_data_mem, 0, BUFSIZE);
@@ -528,23 +512,18 @@ int main(int argc, char *argv[]) {
   /* initialize state records */
   memset(cpu, 0, sizeof(struct RingState));
   // initialize device memory
-  //memset(gpu, 0, sizeof(struct RingState));
   e = Q.submit([&](sycl::handler &h) {
       h.memcpy(gpu, cpu, sizeof(struct RingState));
     });
   e.wait_and_throw();
 
-  initstate(cpu, device_data_hostmap, host_data_mem, loc_cpu_to_gpu_count, loc_gpu_to_cpu_count, "cpu");
+  initstate(cpu, device_data_hostmap, host_data_hostmap, loc_cpu_to_gpu_count, loc_gpu_to_cpu_count, "cpu");
   e = Q.submit([&](sycl::handler &h) {
       h.parallel_for_work_group(sycl::range(1), sycl::range(1), [=](sycl::group<1> grp) {
 	  initstate(gpu, host_data_mem, device_data_mem, loc_gpu_to_cpu_count, loc_cpu_to_gpu_count, "gpu");
 	});
     });
   e.wait_and_throw();
-
-  //initstate(gpu, host_data_mem, device_data_hostmap, loc_gpu_to_cpu_count, loc_cpu_to_gpu_count, "gpu");
-  
-  
 
   std::cout << "kernel going to launch" << std::endl;
   unsigned long start_time, end_time;
@@ -565,14 +544,14 @@ int main(int argc, char *argv[]) {
 	      uint64_t msgdata[7] = {0xdeadbeef, 0, 0, 0, 0, 0, 0};
 	      for (int i = 0; i < gpu->send_count; i += 1) {
 		msgdata[1] = i;
-		ring_cpu_send(gpu, MSG_PUT, loc_size, msgdata);
+		ring_send(gpu, MSG_PUT, loc_size, msgdata);
 		if (loc_latency) {
-		  while (gpu->total_received != (i+1)) {
-		    ring_cpu_poll(gpu);
+		  while (gpu->total_received <= (i+1)) {
+		    ring_poll(gpu);
 		  }
 		}
 	      }
-	      ring_gpu_drain(gpu);
+	      ring_drain(gpu);
 	    });
 	});
 
@@ -604,7 +583,11 @@ int main(int argc, char *argv[]) {
     std::cout << argv[0];
     std::cout << " --gpu_to_cpu_count " << loc_gpu_to_cpu_count << " ";
     std::cout << "--cpu_to_gpu_count " << loc_cpu_to_gpu_count << " ";
+    std::cout << " --gpu_to_cpu_buf " << loc_gpu_to_cpu_buf << " ";
+    std::cout << "--cpu_to_gpu_buf " << loc_cpu_to_gpu_buf << " ";
     std::cout << "--size " << loc_size << " ";
+    if (loc_cpu) std::cout << "--use_cpu ";
+    if (loc_latency) std::cout << "--latency ";
 
     std::cout << "  each " << nsec << " nsec " << mbps << "MB/s" << std::endl;
     printstats(cpu);
