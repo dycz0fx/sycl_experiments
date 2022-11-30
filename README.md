@@ -9,6 +9,11 @@ Build Instructions
 $ mkdir build
 $ cd build
 $ cmake ..
+
+[LCS]
+ MKL_DIR=/opt/intel/inteloneapi/mkl/latest/lib/cmake/mkl
+ TBB_DIR=/opt/intel/inteloneapi/tbb/latest/lib/cmake/tbb cmake ..
+ 
 $ cmake --build .
 $ ctest
 ```
