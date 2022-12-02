@@ -67,7 +67,7 @@ def sgsizevswgsize(mode, size, title, fname):
     plt.show()
 
     
-modetext = ['push_cross_tile','pull_cross_tile','push_cross_device','pull_cross_device','same_tile']
+modetext = ['push_cross_tile','pull_cross_tile','push_cross_device','pull_cross_device','same_tile', "pull_host", "push_host"]
 def sizevswgsize(mode, title, fname):
     fig = plt.figure(figsize=(7,7))
     ax = plt.axes()
@@ -88,6 +88,9 @@ def sizevswgsize(mode, title, fname):
     plt.savefig(fname, format='pdf')
     plt.show()
 
+zerotime = 0.140
+zerocount = 8192.0
+zeroeach = zerotime/zerocount
 
 def plotall(cmd, mode, title, fname):
     fig = plt.figure(figsize=(7,7))
@@ -105,10 +108,17 @@ def plotall(cmd, mode, title, fname):
     wgsizes.sort()
     print(wgsizes)
     for wgsize in wgsizes:
-            x = [r['size'] for r in matchdata if r['wgsize'] == wgsize]
-            y = [r['bandwidth'] for r in matchdata if r['wgsize'] == wgsize]
-            print("plot", x, y)
-            plt.plot(x, y, label=str(str(wgsize)))
+        x = [r['size'] for r in matchdata if r['wgsize'] == wgsize]
+        y = [(r['size']/1000000.0)/((r['duration']/r['count']) - zeroeach)  for r in matchdata if r['wgsize'] == wgsize]
+        #y = [r['bandwidth'] for r in matchdata if r['wgsize'] == wgsize]
+        print("plot", x, y)
+        plt.plot(x, y, label=str(str(wgsize)))
+    for wgsize in [1024]:
+        x = [r['size'] for r in data if r['cmd'] == 2 and r['mode'] == mode and r['wgsize'] == wgsize]
+        y = [(r['size']/1000000.0)/((r['duration']/r['count']) - zerotime) for r in data if r['cmd'] == 2 and  r['mode'] == mode and r['wgsize'] == wgsize]
+        #y = [r['bandwidth'] for r in data if r['cmd'] == 2 and r['mode'] == mode and r['wgsize'] == wgsize]
+        print("plot", x, y)
+        plt.plot(x, y, label="range")
     plt.title(title)
     leg = plt.legend(loc='lower right')
     plt.grid()
@@ -119,6 +129,6 @@ def plotall(cmd, mode, title, fname):
     
 cmdtext = ["nd_range", "work_group", "range"]
 
-for cmd in range(3):
-    for mode in range(5):
-        plotall(cmd, mode, cmdtext[cmd]+modetext[mode], cmdtext[cmd]+ "_" +modetext[mode]+".pdf")
+for cmd in range(2):
+    for mode in range(7):
+        plotall(cmd, mode, cmdtext[cmd]+"_"+modetext[mode], cmdtext[cmd]+ "_" +modetext[mode]+".pdf")
