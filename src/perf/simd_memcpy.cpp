@@ -78,14 +78,14 @@ void runkernel_nd_range(sycl::queue q, ulong *d, ulong *s, size_t size, int wg_s
 void runkernel_work_group(sycl::queue q, ulong *d, ulong *s, size_t size, int wg_size, int count)
 {
   size_t iterations = size / sizeof(ulong);
-  size_t loc_loop = iterations / (wg_size);
+  int groups = iterations / wg_size;
   for (int iter = 0; iter < count; iter += 1) {
     auto e = q.submit([&](sycl::handler &h) {
-	h.parallel_for_work_group(sycl::range(1), sycl::range(wg_size), [=](sycl::group<1> grp) {
+	h.parallel_for_work_group(sycl::range(groups), sycl::range(wg_size), [=](sycl::group<1> grp) {
+	    int i = grp.get_group_id(0);
 	    grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
-		int j = it.get_global_id()[0];
-		for (int k = j * loc_loop; k < (j+1) * loc_loop; k += 1)
-		  d[k] = s[k];
+		int idx = (i * wg_size) + it.get_local_id(0);
+		d[idx] = s[idx];
 	      });
 	  });
       });
@@ -173,13 +173,13 @@ int main(int argc, char *argv[]) {
   std::cout << " memory initialized " << std::endl;
 
   // Measure time for an empty kernel (with size 1)
-  printf("csv,mode,size,sgsize,wgsize,count,duration,bandwidth\n");
+  printf("csv,cmd,mode,size,sgsize,wgsize,count,duration,bandwidth\n");
     // size is in bytes
   #define PARALLEL_RANGE 2
   #define PARALLEL_ND_RANGE 0
   #define PARALLEL_WORK_GROUP 1
   for (int cmd = 0; cmd < 3; cmd += 1) {
-    for (int mode = 0; mode < 5; mode += 1) {
+    for (int mode = 0; mode < 7; mode += 1) {
       ulong *s, *d;
       switch (mode) {
       case 0:  // push
@@ -202,24 +202,35 @@ int main(int argc, char *argv[]) {
 	s = dev_src[0];
 	d = dev_dest[0];
 	break;
+      case 5: // host push
+	s = dev_src[0];
+	d = host_dest[0];
+	break;
+      case 6: // host pull
+	s = host_src[0];
+	d = dev_dest[0];
+	break;
       default:
 	assert(0);
       }
       int min_wg_size = 1;
       int max_wg_size = qs[0].get_device().get_info<cl::sycl::info::device::max_work_group_size>();
+      //printf("max_wg_size %d\n", max_wg_size);
       for (size_t size = 32 * sizeof(ulong); size < BUFSIZE; size <<= 1) {
 	size_t iterations = size / sizeof(ulong);
+	int this_max_wg_size;
 	if (cmd == PARALLEL_RANGE) {
 	  min_wg_size = max_wg_size;
 	} else if (cmd == PARALLEL_ND_RANGE) {
 	  min_wg_size = 1;
-	  if (max_wg_size > iterations) max_wg_size = iterations;
+	  if (max_wg_size > iterations) this_max_wg_size = iterations;
+	  else this_max_wg_size = max_wg_size;
 	} else if (cmd == PARALLEL_WORK_GROUP) {
 	  min_wg_size = 32;
 	}
-	for (int wg_size = min_wg_size; wg_size <= max_wg_size; wg_size <<= 1) {
-	  printf("wg_size %ld size %ld size/8 %ld\n", wg_size, size, size/8);
-	  fflush(stdout);
+	for (int wg_size = min_wg_size; wg_size <= this_max_wg_size; wg_size <<= 1) {
+	  //printf("wg_size %d size %ld size/8 %ld\n", wg_size, size, size/8);
+	  //fflush(stdout);
 	  double duration;
 	  int count;
 	  // run for more and more counts until it takes more than 0.1 sec
