@@ -5,7 +5,7 @@
 #include <getopt.h>
 #include <iostream>
 #include "level_zero/ze_api.h"
-#include <CL/sycl/backend/level_zero.hpp>
+//#include <CL/sycl/backend/level_zero.hpp>
 #include <sys/mman.h>
 #include"../common_includes/rdtsc.h"
 #include <time.h>
@@ -352,7 +352,7 @@ int main(int argc, char *argv[]) {
   if (loc_readsize > BUFSIZE/4) loc_readsize = BUFSIZE/4;
   if (loc_writesize > BUFSIZE/4) loc_writesize = BUFSIZE/4;
   sycl::property_list prop_list{sycl::property::queue::enable_profiling()};
-  sycl::queue Q(sycl::gpu_selector{}, prop_list);
+  sycl::queue Q(sycl::gpu_selector_v, prop_list);
   std::cout<<"selected device : "<<Q.get_device().get_info<sycl::info::device::name>() << std::endl;
   std::cout<<"device vendor : "<<Q.get_device().get_info<sycl::info::device::vendor>() << std::endl;
 

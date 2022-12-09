@@ -6,7 +6,7 @@
 #include<thread>
 #include<iostream>
 #include"level_zero/ze_api.h"
-#include<CL/sycl/backend/level_zero.hpp>
+//#include<CL/sycl/backend/level_zero.hpp>
 #include<sys/mman.h>
 
 #define VLT volatile
@@ -41,7 +41,7 @@ struct info_t {
 #define cpu_relax() asm volatile("rep; nop")
 
 
-void add_data_to_buffer(packet_t pkt, size_t index, info_t info, sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> tmp_counter_atomic) {
+void add_data_to_buffer(packet_t pkt, size_t index, info_t info, sycl::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> tmp_counter_atomic) {
 
     //write data to the buffer
     //sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> buff_atomic(info.buff[index%capacity]);
@@ -53,7 +53,7 @@ void add_data_to_buffer(packet_t pkt, size_t index, info_t info, sycl::ext::onea
     long *buff_ptr = (long*) &(info.buff[index%capacity]);
     long *pkt_ptr = (long*) &pkt;
     for(int i=0; i<num_parts;i++){
-        sycl::ext::oneapi::atomic_ref<long, sycl::memory_order::seq_cst, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> buff_atomic(buff_ptr[i]);
+        sycl::atomic_ref<long, sycl::memory_order::seq_cst, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> buff_atomic(buff_ptr[i]);
         buff_atomic.store(pkt_ptr[i]);
     }
 
@@ -64,7 +64,7 @@ void add_data_to_buffer(packet_t pkt, size_t index, info_t info, sycl::ext::onea
     //buff_atomic.store(1);
     
     //set flag to 1 to denote the data is available
-    sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> flag_atomic(info.flag[index%capacity]);
+    sycl::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> flag_atomic(info.flag[index%capacity]);
     flag_atomic.store(1);
 
     //DEBUG
@@ -75,23 +75,23 @@ void oshmem_int64_t_put(int64_t dest, int64_t val, info_t info) {
     packet_t pkt {dest, val, 1};
     
     //find an index to put the packet
-    sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> last_atomic(info.last[0]);
+    sycl::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> last_atomic(info.last[0]);
     size_t index = last_atomic.fetch_add(1);
 
     //DEBUG START
     auto idx = sycl::ext::oneapi::experimental::this_nd_item<1>();
     size_t g_idx = idx.get_global_id(0);
-    sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> tmp_index_atomic(info.tmp_index[g_idx]);
+    sycl::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> tmp_index_atomic(info.tmp_index[g_idx]);
     tmp_index_atomic.store(index);
     //info.tmp_index[g_idx] = index;
 
-    sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> tmp_counter_atomic(info.tmp_counter[g_idx]);
+    sycl::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> tmp_counter_atomic(info.tmp_counter[g_idx]);
     tmp_counter_atomic.store(index);
     //DEBUG END
 
     //make sure there is space
     //if there is no space, wait until space becomes available
-    sycl::ext::oneapi::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> first_atomic(info.first[0]);
+    sycl::atomic_ref<size_t, sycl::memory_order::acq_rel, sycl::memory_scope::device, sycl::access::address_space::ext_intel_global_device_space> first_atomic(info.first[0]);
 
     size_t capacity_req = index - first_atomic.load();
     if(capacity_req < capacity) {
