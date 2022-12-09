@@ -93,8 +93,11 @@ void memcheck(const char *msg, int src, int dest, int val, size_t size) {
 }
 
 void setandcheck(const char *msg, int src, int dest, sycl::queue q, uint64_t *p, int val, size_t size) {
+  memset(checkbuf, 0, size);
+  std::cout << msg << " memset" << std::endl;
   q.memset(p, val, size);
   q.wait_and_throw();
+  std::cout << msg << " memcpy to host" << std::endl;
   q.memcpy(checkbuf, p, size);
   q.wait_and_throw();
   memcheck(msg, src, dest, val, size);
@@ -130,11 +133,11 @@ int main(int argc, char *argv[]) {
   int haz_ngpu = qs.size();
   std::cout << "Number of GPUs found  = " << haz_ngpu << std::endl;
 
-  int ngpu = 2;   // make a command line argument
+  int ngpu = haz_ngpu;   // make a command line argument
   
   std::vector<uint64_t *> device_src(ngpu);
   std::vector<uint64_t *> device_dest(ngpu);
-
+ 
   // vector of a vector of pointers
   std::vector<uint64_t **> device_src_map(ngpu);
   std::vector<uint64_t **> device_dest_map(ngpu);
@@ -149,6 +152,21 @@ int main(int argc, char *argv[]) {
     std::cout << " device_src[" << i << "] " << device_src[i] << std::endl;
     std::cout << " device_dest[" << i << "] " << device_dest[i] << std::endl;
   }
+  for (int i = 0; i < ngpu; i += 1) {
+    for (int j = 0 ; j < ngpu; j += 1) {
+      uint64_t *p = device_src[j];
+      qs[i].submit([&](sycl::handler &h) {
+	  auto out = sycl::stream(1024, 768, h);
+	  auto task = 
+	    [=]() {
+	    out << "gpu " << i << " device_src[" << j << "] = " << p << "\n";
+	  };
+	h.single_task(task);
+      }).wait();
+    }
+  }
+
+  
 
   #if 0
   // initialize IPC addresses for each GPU
@@ -231,11 +249,11 @@ int main(int argc, char *argv[]) {
   }
   
 #endif
-  std::cout << "test readback no ipc" << std::endl;
+  std::cout << "test readback src no ipc" << std::endl;
   for (int i = 0; i < ngpu; i += 1) {
     for (int j = 0; j < ngpu; j += 1) {
-      std::cout << "readback on " << i << " to " << j << std::endl;
-      setandcheck(" readback ", i, j, qs[i], device_src[j], (i << 4) + j, CHECKSIZE);
+      std::cout << "readback src on " << i << " to " << j << std::endl;
+      setandcheck(" readback src ", i, j, qs[i], device_src[j], (i << 4) + j, CHECKSIZE);
 
     }
   }
@@ -290,6 +308,10 @@ int main(int argc, char *argv[]) {
     }
   }
 #endif
+
+
+  return (0);
+    
   for (int mode = 0; mode < 3; mode += 1) {
     uint64_t *s, *d;
     switch (mode) {
@@ -347,6 +369,7 @@ int main(int argc, char *argv[]) {
 	double bw = size / (per_iter);
 	double bw_mb = bw / 1000000.0;
 	printf("csv, %d, %ld, %d, %d, %f, %f\n", mode, size, threads, count, per_iter, bw_mb);
+	fflush(stdout);
       }
     }
   }
@@ -356,17 +379,4 @@ int main(int argc, char *argv[]) {
 
 }
 
-
-
-#if 0
-	uint64_t start =
-	  e.get_profiling_info<sycl::info::event_profiling::command_start>();
-	uint64_t end =
-	  e.get_profiling_info<sycl::info::event_profiling::command_end>();
-	duration = static_cast<double>(end - start) / NSEC_IN_SEC;
-	if (duration > 0.1) {
-	  duration /= count;
-	  break;
-	}
-#endif
 
