@@ -1,4 +1,4 @@
-
+set(CMAKE_BUILD_TYPE Debug)
 link_libraries(ze_loader)
 add_compile_options(-march=sapphirerapids)
 #add_compile_options(-mavx512f)   
