@@ -4,6 +4,8 @@
 #include "ringlib.h"
 #include "uncached.cpp"
 
+#define DEBUG 0
+
 void initstate(struct RingState *s, struct RingMessage *sendbuf, struct RingMessage *recvbuf, int send_count, int recv_count, const char *name)
 {
   s->next_send = 0;
@@ -67,6 +69,7 @@ void gpu_ring_process_message(struct RingState *s, struct RingMessage *msg)
 void gpu_ring_internal_receive(struct RingState *s)
 {
   /* volatile */ struct RingMessage *msg = &(s->recvbuf[s->next_receive]);
+  sycl::atomic_fence(sycl::memory_order::acquire, sycl::memory_scope::system);
   if (msg->header != MSG_IDLE) {
     s->peer_next_receive = msg->next_receive;
     gpu_ring_process_message(s, (struct RingMessage *) msg);
@@ -88,6 +91,7 @@ void gpu_send_nop(struct RingState *s)
   s->peer_next_receive_sent = s->next_receive;
   struct RingMessage *mp = &(s->sendbuf[s->next_send]);
   ucs_ulong8((ulong8 *) mp, msg);
+  sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system);
   s->next_send = (s->next_send + 1) % RingN;
   s->total_nop += 1;
 }
@@ -96,6 +100,7 @@ void gpu_send_nop(struct RingState *s)
 void gpu_ring_poll(struct RingState *s)
 {
   /* volatile */ struct RingMessage *msg = &(s->recvbuf[s->next_receive]);
+  sycl::atomic_fence(sycl::memory_order::acquire, sycl::memory_scope::system);
   if (msg->header != MSG_IDLE) {
     s->peer_next_receive = msg->next_receive;
     gpu_ring_process_message(s, (struct RingMessage *) msg);
@@ -120,6 +125,7 @@ void gpu_ring_send(struct RingState *s, int type, int length, void *data)
   memcpy(&msgp->data, data, length);  // local copy
   struct RingMessage *mp = &(s->sendbuf[s->next_send]);
   ucs_ulong8((ulong8 *) mp, msg);
+  sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system);
   s->next_send = (s->next_send + 1) % RingN;
   s->total_sent += 1;
 }
