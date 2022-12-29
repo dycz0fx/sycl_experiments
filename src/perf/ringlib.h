@@ -1,16 +1,17 @@
 #ifndef RINGLIB_H
 #define RINGLIB_H
 
+#define TRACE 1
 
 constexpr int RingN = 1024;
-constexpr int NOP_THRESHOLD = 256;   /* N/4 ? See analysis */
+constexpr int NOP_THRESHOLD = 128;   /* N/4 ? See analysis */
 
-
-/* message types, all non-zero */
+/* message types, all non-zero Non-zero acts as the ready flag*/
 #define MSG_IDLE 0
 #define MSG_NOP 1
 #define MSG_PUT 2
 #define MSG_GET 3
+#define NUM_MESSAGE_TYPES 4
 
 /* should the length be implicit or explicit? */
 struct RingMessage {
@@ -40,11 +41,13 @@ struct RingState {
   int32_t peer_next_receive_sent; // last time next_receive was sent
   struct RingMessage *sendbuf;   // remote buffer
   struct RingMessage *recvbuf;   // local buffer
-  int32_t total_received;     // for accounting
-  int32_t total_sent;
-  int32_t total_nop;
+  int32_t total_sent[NUM_MESSAGE_TYPES];     // for accounting
+  int32_t total_received[NUM_MESSAGE_TYPES];     // for accounting
   int32_t send_count;        // from command line
   int32_t recv_count;
+  int32_t wait_in_send_nop;
+  int32_t wait_in_send;
+  int32_t wait_in_drain;
   const char *name;
 };
 

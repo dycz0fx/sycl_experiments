@@ -216,7 +216,7 @@ void CPUThread(struct RingState *s, size_t size, int latencyflag)
     cpu_ring_send(s, MSG_PUT, size, msgdata);
     //gpu_ring_poll(s);
     if (latencyflag) {
-      while (s->total_received < (i+1)) {
+      while (s->total_received[MSG_PUT] < (i+1)) {
 	cpu_ring_poll(s);
       }
     }
@@ -231,6 +231,23 @@ void *ThreadFn(void * arg)
   return (NULL);
 }
 
+struct JoinStruct {
+  sycl::event e;
+  pthread_t thread;
+  int loc_cpu;
+  int * completion;
+};
+void *Joiner(void *arg)
+{ 
+  struct JoinStruct *p = (struct JoinStruct *) arg;
+  if (p->loc_cpu) {
+    pthread_join(p->thread, NULL);
+  } else {
+    p->e.wait();
+  }
+  *p->completion = 1;
+  return(NULL);
+}
 
 void GPUThread(struct RingState *s, size_t size, int latencyflag)
 {  // gpu code
@@ -240,7 +257,7 @@ void GPUThread(struct RingState *s, size_t size, int latencyflag)
     gpu_ring_send(s, MSG_PUT, size, msgdata);
     //gpu_ring_poll(s);
     if (latencyflag) {
-      while (s->total_received < (i+1)) {
+      while (s->total_received[MSG_PUT] < (i+1)) {
 	gpu_ring_poll(s);
       }
     }
@@ -250,15 +267,27 @@ void GPUThread(struct RingState *s, size_t size, int latencyflag)
 
 void printstats(struct RingState *s)
 {
-  std::cout << s->name << " sent " << s->total_sent << " recv " << s->total_received << " nop " << s->total_nop << std::endl;
-  std::cout << "send buf " << s->sendbuf << std::endl;
-  std::cout << "recv buf " << s->recvbuf << std::endl;
-  std::cout << "next send " << s->next_send << std::endl;
-  std::cout << "next receive " << s->next_receive << std::endl;
-  std::cout << "peer next receive " << s->peer_next_receive << std::endl;
-  std::cout << "peer next receive sent " << s->peer_next_receive_sent << std::endl;
-  std::cout << "send count " << s->send_count << std::endl;
-  std::cout << "recv count " << s->recv_count << std::endl;
+  std::cout << s->name << std::endl;
+  std::cout << "  total_sent MSG_IDLE " << s->total_sent[MSG_IDLE] << std::endl;
+  std::cout << "  total_sent MSG_NOP " << s->total_sent[MSG_NOP] << std::endl;
+  std::cout << "  total_sent MSG_PUT " << s->total_sent[MSG_PUT] << std::endl;
+  std::cout << "  total_sent MSG_GET " << s->total_sent[MSG_GET] << std::endl;
+  std::cout << "  total_received MSG_IDLE " << s->total_received[MSG_IDLE] << std::endl;
+  std::cout << "  total_received MSG_NOP " << s->total_received[MSG_NOP] << std::endl;
+  std::cout << "  total_received MSG_PUT " << s->total_received[MSG_PUT] << std::endl;
+  std::cout << "  total_received MSG_GET " << s->total_received[MSG_GET] << std::endl;
+
+  std::cout << "  send buf " << s->sendbuf << std::endl;
+  std::cout << "  recv buf " << s->recvbuf << std::endl;
+  std::cout << "  next send " << s->next_send << std::endl;
+  std::cout << "  next receive " << s->next_receive << std::endl;
+  std::cout << "  peer next receive " << s->peer_next_receive << std::endl;
+  std::cout << "  peer next receive sent " << s->peer_next_receive_sent << std::endl;
+  std::cout << "  send count " << s->send_count << std::endl;
+  std::cout << "  recv count " << s->recv_count << std::endl;
+  std::cout << "  wait_in_send_nop " << s->wait_in_send_nop << std::endl;
+  std::cout << "  wait_in_send " << s->wait_in_send << std::endl;
+  std::cout << "  wait_in_drain " << s->wait_in_drain << std::endl;
 }
 
 template<typename T>
@@ -453,28 +482,36 @@ int main(int argc, char *argv[]) {
     else assert(0);
   }
 
-  memset(cpu_a2b_mem, 0, BUFSIZE);
-  memset(cpu_b2a_mem, 0, BUFSIZE);
-  if (loc_a != LOC_CPU) {
+  if (loc_a == LOC_CPU) {
+    memset(gpua_tx_mem, 0, BUFSIZE);
+  } else  {
     qa.memset(gpua_tx_mem, 0, BUFSIZE);
     qa.wait_and_throw();
   }
-  if (loc_b != LOC_CPU) {
+  if (loc_b == LOC_CPU) {
+    memset(gpub_tx_mem, 0, BUFSIZE);
+  } else {
     qb.memset(gpub_tx_mem, 0, BUFSIZE);
     qb.wait_and_throw();
   }
   struct RingState *gpua;
   struct RingState *gpub;
+  struct RingState *gpu_host_a;
+  struct RingState *gpu_host_b;
 
   if (loc_a == LOC_CPU) {
     gpua = (struct RingState *) sycl::aligned_alloc_host(4096, sizeof(struct RingState), qa);
+    gpu_host_a = gpua;
   } else {
     gpua = (struct RingState *) sycl::aligned_alloc_device(4096, sizeof(struct RingState), qa);
-  }
+    gpu_host_a = get_mmap_address(gpua, 4096, qa);
+   }
   if (loc_b == LOC_CPU) {
     gpub = (struct RingState *) sycl::aligned_alloc_host(4096, sizeof(struct RingState), qb);
+    gpu_host_b = gpub;
   } else {
     gpub = (struct RingState *) sycl::aligned_alloc_device(4096, sizeof(struct RingState), qb);
+    gpu_host_b = get_mmap_address(gpub, 4096, qb);
   }
   std::cout << " gpua " << gpua << std::endl;
   std::cout << " gpub " << gpub << std::endl;
@@ -488,7 +525,7 @@ int main(int argc, char *argv[]) {
       });
     qa.wait_and_throw();
   }
-  if (loc_a == LOC_CPU) {
+  if (loc_b == LOC_CPU) {
     initstate(gpub, gpub_tx_mem, gpub_rx_mem, loc_b2a_count, loc_a2b_count, NULL);
   } else {
     qb.single_task( [=]() {
@@ -504,20 +541,10 @@ int main(int argc, char *argv[]) {
   myrsa = (struct RingState *) sycl::aligned_alloc_host(4096, sizeof(struct RingState), qa);
   myrsb = (struct RingState *) sycl::aligned_alloc_host(4096, sizeof(struct RingState), qb);
 
-  if (loc_a == LOC_CPU) {
-    memcpy(myrsa, gpua, sizeof(struct RingState));
-  } else {
-    qa.memcpy(myrsa, gpua, sizeof(struct RingState));
-    qa.wait_and_throw();
-  }
+  memcpy(myrsa, gpu_host_a, sizeof(struct RingState));
   myrsa->name = "gpua";
   printstats(myrsa);
-  if (loc_a == LOC_CPU) {
-    memcpy(myrsb, gpub, sizeof(struct RingState));
-  } else {
-    qb.memcpy(myrsb, gpub, sizeof(struct RingState));
-    qb.wait_and_throw();
-  }
+  memcpy(myrsb, gpu_host_b, sizeof(struct RingState));
   myrsb->name = "gpub";
   printstats(myrsb);
 
@@ -536,33 +563,52 @@ int main(int argc, char *argv[]) {
   pthread_t bthread;
   pthread_attr_t pt_attributes;
   pthread_attr_init(&pt_attributes);
-
-
+  struct JoinStruct ajoin, bjoin;
+  int acompletion = 0;
+  int bcompletion = 0;
+  ajoin.completion = &acompletion;
+  bjoin.completion = &bcompletion;
+  
   if (loc_a == LOC_CPU) {
     pthread_create(&athread, &pt_attributes, ThreadFn, (void *) gpua);
+    ajoin.loc_cpu = 1;
+    ajoin.thread = athread;
   } else {
     ea = qa.single_task([=]() {
 	GPUThread(gpua, loc_size, loc_latency);
       });
+    ajoin.loc_cpu = 0;
+    ajoin.e = ea;
   }
   if (loc_b == LOC_CPU) {
     pthread_create(&bthread, &pt_attributes, ThreadFn, (void *) gpub);
+    bjoin.loc_cpu = 1;
+    bjoin.thread = bthread;
   } else {
-    ea = qb.single_task([=]() {
+    eb = qb.single_task([=]() {
 	GPUThread(gpub, loc_size, loc_latency);
       });
+    bjoin.loc_cpu = 0;
+    bjoin.e = eb;
   }
+  pthread_t ajoiner, bjoiner;
+  pthread_create(&ajoiner, &pt_attributes, Joiner, &ajoin);
+  pthread_create(&bjoiner, &pt_attributes, Joiner, &bjoin);
 
-  if (loc_a == LOC_CPU) pthread_join(athread, NULL);
-  else ea.wait_and_throw();
-  if (loc_b == LOC_CPU) pthread_join(bthread, NULL);
-  else eb.wait_and_throw();
 
-  clock_gettime(CLOCK_REALTIME, &ts_end);
-  end_time = rdtsc();
+  for (;;) {
+    clock_gettime(CLOCK_REALTIME, &ts_end);
+    end_time = rdtsc();
+    if (acompletion && bcompletion) break;
+    if (ts_end.tv_sec - ts_start.tv_sec > 8) {
+      printf("TIMEOUT\n acomplete %d bcomplete %d", acompletion, bcompletion);
+      break;
+    }
+  }
   // if (loc_a != LOC_CPU) printduration("gpua kernel ", ea);
   //if (loc_b != LOC_CPU) printduration("gpub kernel ", eb);
-      
+  if (acompletion) pthread_join(ajoiner, NULL);
+  if (bcompletion) pthread_join(bjoiner, NULL);
   /* common cleanup */
   double elapsed = ((double) (ts_end.tv_sec - ts_start.tv_sec)) * 1000000000.0 +
     ((double) (ts_end.tv_nsec - ts_start.tv_nsec));
@@ -588,20 +634,10 @@ int main(int argc, char *argv[]) {
   
   std::cout << "  each " << nsec << " nsec " << mbps << "MB/s" << std::endl;
 
-    if (loc_a == LOC_CPU) {
-    memcpy(myrsa, gpua, sizeof(struct RingState));
-  } else {
-    qa.memcpy(myrsa, gpua, sizeof(struct RingState));
-    qa.wait_and_throw();
-  }
+  memcpy(myrsa, gpu_host_a, sizeof(struct RingState));
   myrsa->name = "gpua";
   printstats(myrsa);
-  if (loc_a == LOC_CPU) {
-    memcpy(myrsb, gpub, sizeof(struct RingState));
-  } else {
-    qb.memcpy(myrsb, gpub, sizeof(struct RingState));
-    qb.wait_and_throw();
-  }
+  memcpy(myrsb, gpu_host_b, sizeof(struct RingState));
   myrsb->name = "gpub";
   printstats(myrsb);
   return 0;

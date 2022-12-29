@@ -149,6 +149,7 @@ void ProcessArgs(int argc, char **argv)
 	}
 	case CMD_CPU: {
 	  glob_cpu = true;
+	  std::cout << "loc_cpu " << glob_cpu << std::endl;
 	  break;
 	}
 	case CMD_ATOMICSTORE: {
@@ -222,8 +223,8 @@ void *GPUThread(void *arg)
     cpu_ring_send(s, MSG_PUT, glob_size, msgdata);
     //printf ("%s %d\n", s->name, i);
     if (glob_latency) {
-      while (s->total_received < (i+1)) {
-	if (DEBUG) printf("latency %s sent %d recd %d\n", s->name, i, s->total_received);
+      while (s->total_received[MSG_PUT] < (i+1)) {
+	if (DEBUG) printf("latency %s sent %d recd %d\n", s->name, i, s->total_received[MSG_PUT]);
 	cpu_relax();
 	cpu_ring_poll(s);
       }
@@ -233,10 +234,29 @@ void *GPUThread(void *arg)
   return(NULL);
 }
 
-
 void printstats(struct RingState *s)
 {
-  std::cout << s->name << " sent " << s->total_sent << " recv " << s->total_received << " nop " << s->total_nop << std::endl;
+  std::cout << s->name << std::endl;
+  std::cout << "  total_sent MSG_IDLE " << s->total_sent[MSG_IDLE] << std::endl;
+  std::cout << "  total_sent MSG_NOP " << s->total_sent[MSG_NOP] << std::endl;
+  std::cout << "  total_sent MSG_PUT " << s->total_sent[MSG_PUT] << std::endl;
+  std::cout << "  total_sent MSG_GET " << s->total_sent[MSG_GET] << std::endl;
+  std::cout << "  total_received MSG_IDLE " << s->total_received[MSG_IDLE] << std::endl;
+  std::cout << "  total_received MSG_NOP " << s->total_received[MSG_NOP] << std::endl;
+  std::cout << "  total_received MSG_PUT " << s->total_received[MSG_PUT] << std::endl;
+  std::cout << "  total_received MSG_GET " << s->total_received[MSG_GET] << std::endl;
+
+  std::cout << "  send buf " << s->sendbuf << std::endl;
+  std::cout << "  recv buf " << s->recvbuf << std::endl;
+  std::cout << "  next send " << s->next_send << std::endl;
+  std::cout << "  next receive " << s->next_receive << std::endl;
+  std::cout << "  peer next receive " << s->peer_next_receive << std::endl;
+  std::cout << "  peer next receive sent " << s->peer_next_receive_sent << std::endl;
+  std::cout << "  send count " << s->send_count << std::endl;
+  std::cout << "  recv count " << s->recv_count << std::endl;
+  std::cout << "  wait_in_send_nop " << s->wait_in_send_nop << std::endl;
+  std::cout << "  wait_in_send " << s->wait_in_send << std::endl;
+  std::cout << "  wait_in_drain " << s->wait_in_drain << std::endl;
 }
 
 int main(int argc, char *argv[]) {
@@ -252,7 +272,6 @@ int main(int argc, char *argv[]) {
   int loc_latency = glob_latency;
   int loc_cpu = glob_cpu;
 
-  
   sycl::property_list prop_list{sycl::property::queue::enable_profiling()};
   sycl::queue Q;
   if (loc_cpu) {
@@ -346,7 +365,7 @@ int main(int argc, char *argv[]) {
 		  msgdata[1] = i;
 		  gpu_ring_send(gpu, MSG_PUT, loc_size, msgdata);
 		  if (loc_latency) {
-		    while (gpu->total_received < (i+1)) {
+		    while (gpu->total_received[MSG_PUT] < (i+1)) {
 		      gpu_ring_poll(gpu);
 		    }
 		  }
@@ -406,15 +425,16 @@ int main(int argc, char *argv[]) {
     double nsec = elapsed / fcount;
     std::cout << "elapsed " << elapsed << " fcount " << fcount << std::endl;
     std::cout << argv[0];
-    std::cout << " --g2c_count " << loc_g2c_count;
-    std::cout << " --c2g_count " << loc_c2g_count;
-    std::cout << " --g2c_buf " << loc_g2c_buf;
-    std::cout << " --c2g_buf " << loc_c2g_buf;
-    std::cout << " --size " << loc_size;
+    std::cout << " --gputogpucount=" << loc_g2c_count;
+    std::cout << " --cputogpucount=" << loc_c2g_count;
+    std::cout << " --gputocpubuf=" << loc_g2c_buf;
+    std::cout << " --cputogpubuf=" << loc_c2g_buf;
+    std::cout << " --size=" << loc_size;
     if (loc_cpu) std::cout << " --use_cpu";
     if (loc_latency) std::cout << " --latency";
 
     std::cout << "  each " << nsec << " nsec " << mbps << "MB/s" << std::endl;
+
     printstats(cpu);
     Q.memcpy(cpu, gpu, sizeof(struct RingState));
     Q.wait_and_throw();
