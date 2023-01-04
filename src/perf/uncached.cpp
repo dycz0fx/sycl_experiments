@@ -73,6 +73,19 @@ SYCL_EXTERNAL extern "C" void  __builtin_IB_lsc_store_global_ulong8(__global ulo
 
 
 
+static inline void ucs_uint(uint  *base, uint  val)
+{
+#ifdef __SYCL_DEVICE_ONLY__
+#if USE_BUILTIN
+  __builtin_IB_lsc_store_global_uint (base, 0, val, LSC_STCC_L1UC_L3UC);
+#else
+  *base = val;
+#endif
+#else
+  *base = val;
+#endif
+}
+
 static inline void ucs_ulong(ulong  *base, ulong  val)
 {
 #ifdef __SYCL_DEVICE_ONLY__

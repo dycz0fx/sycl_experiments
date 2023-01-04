@@ -16,11 +16,69 @@ constexpr int NOP_THRESHOLD = 128;   /* N/4 ? See analysis */
 
 /* should the length be implicit or explicit? */
 struct RingMessage {
+  int32_t sequence;
   int32_t header;
-  int32_t next_receive;  /* only used by NOP messages */
   uint64_t data[7];
 };
-constexpr int MaxData = sizeof(uint64_t) * 7;
+
+/* Possibly a union of different message types */
+union RingMessages {
+  ulong8 data;
+  struct RingMessage msg;
+};
+
+/* Principles of operation
+ *
+ * This is a ring buffer for situations with asymmetric memory access
+ * such as across a PCIe bus.  It is assumed that Stores are faster than
+ * Loads, (because they are fire and forget), so only stores are used for remote * operations.  Local operations can be cached and both loads and stores are
+ * fast.  Atomic operations are only supported on local locations.
+ *
+ * Messages are transmitted using a single vector store instruction
+ * of 64 bytes.  The first 32 bits are zero if the buffer is empty
+ * and every message type must have a non-empty first 32 bits
+ * Each end maintains a write counter for its outgoing traffic
+ * and read counter for its incoming traffic
+ *
+ * Each end also has a delayed view of the other end's read counter, called
+ * peer_next_receive
+ *
+ * An end can transmit if (write_counter - peer_next_receive) < (RingN - 1)
+ *
+ * There is a dedicated location on the receive side where each end 
+ * occasionally stores its next_read counter
+ *
+ * The read and write counters wrap at 32 bits, but the ring itself is only
+ * RingN, which must be a power of two
+ *
+ * Multiple senders work by 
+ * 1) atomic allocation of a future send-buffer by fetch_add(1) to their own
+ *    send counter
+ * Allocations may be far in the future, so the sender must wait until the
+ * allocated slot is actually free, which occurs when peer_next_receive has
+ * caught up within RingN-1
+ *
+ * 2) wait until
+ *    (write_counter - peer_next_receive) < (RingN - 1)
+ * while waiting, the sending thread can assist in receiving messages, and
+ * should poll for any updates to peer_next_receive
+ *
+ * 3) send the message (single MOVDIR64B on the host or ucs_ulong8 on the GPU
+ *
+ * Receiving works by 
+ * 1) polling the next expected receive slot for non-zero
+ * 2) handling the message 
+ * 3) clearing the first 32 bits of the just-received message slot
+ * 4) incrementing the next_receive counter
+ * 5) occasionally storing local next_receive to remote peer_next_receive
+ *
+ * For thread safety on receive, only one thread can be in the 1-5 critical 
+ * section (for now)
+ *
+ * an atomic exchange is used to seize the receive lock.
+ * If the lock is already busy,the thread attempting to call Poll can do 
+ * other work instead.
+ */
 
 /* when peer_next_read and next_write pointers are equal, the buffer is empty.
  * when next_write pointer is one less than peer_next_read pointer, 
@@ -33,98 +91,83 @@ constexpr int MaxData = sizeof(uint64_t) * 7;
  *   next_receive - next_received_sent
  */
 
-/* each end of the link has a Ring record */
+/* Handling of next_receive and peer_next_receive
+ * next_receive is a local variable for the receiver
+ * peer_next_receive is a local varaible for the sender
+ * The <receiver> occasionally stores (remote) peer_next_receive from
+ *    (local) next_receive.  This is a bus store
+ * The peer_next_receive cell must be remotely-storable so we put it at the
+ * end of the send buffer (which is located at the receiver)
+ * This is an unfortunate mixing of send and receive associated storage but
+ * it reduces the number of segments that must be remotely accessible
+ *
+ * The <sender> occasionally copies the remotely updated peer_next_receive to a  * local cached copy in the Ring structure
+ *
+ * Receiver locations
+ *   next_receive
+ *   sendbuf[RingN].next_receive  (A)
+ * Sender locations
+ *   recvbuf[RingN].next_receive  (same as A)
+ *   peer_next_receive
+ *
+ * while the sender is waiting for free space in sendbuf, the sender polls
+ * recvbuf[RingN].next_receive and copies it to peer_next_receive
+ * This is how the sending end learns that the receiver has caught up
+ */
+// stores only
+#define LOAD_PEER_NEXT_RECV() (recvbuf[RingN].sequence)
+// loads only
+#define STORE_PEER_NEXT_RECV(x) (sendbuf[RingN].sequence = (x))
+#define GPU_STORE_PEER_NEXT_RECV(x) (ucs_uint((uint *) &sendbuf[RingN].sequence, (uint) x))
+
+
+/* each end of the link has a Ring record 
+ */
 
 class Ring {
  public:
   int32_t next_receive;     // next slot in recvbuf
-  int32_t peer_next_receive;  // last msg read by peer in sendbuf
-  int32_t peer_next_receive_sent; // last time next_receive was sent
   struct RingMessage *sendbuf;   // remote buffer
   struct RingMessage *recvbuf;   // local buffer
-  int32_t total_sent[NUM_MESSAGE_TYPES];     // for accounting
-  int32_t total_received[NUM_MESSAGE_TYPES];     // for accounting
-  int32_t send_count;        // from command line
-  int32_t recv_count;
-  int32_t wait_in_send_nop;
+  // accounting and debug from here down
   int32_t wait_in_send;
   int32_t wait_in_drain;
   // functions
   void Print();
 
 };
+// GPU uses sycl::atomic_ref rather than std::atomic
 class GPURing : public Ring {
  public:
   int32_t next_send;        // next slot in sendbuf
   int32_t receive_lock;
+  // ordering may be excessive
   sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_next_send;
   sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_receive_lock;
   
-  
- GPURing() : atomic_next_send(next_send), atomic_receive_lock(receive_lock) {
-    // everything else left to initstate call
-  }
-  void InitState(struct RingMessage *sendbuf, struct RingMessage *recvbuf, int send_count, int recv_count);
-
-  void Print(const char *name);
+  // must be called on the GPU!
+  GPURing(struct RingMessage *sendbuf, struct RingMessage *recvbuf);
+    
+  void Print(const char *name);  // memory may not be addressible
   void Send(struct RingMessage *msg);
-  void Poll() {
-    InternalReceive();
-    if (SendNOPp()) SendNOP();
-  }
-  void Drain();
+  void Poll();
+  void Drain();  // call poll until there are no messages immediately available
  private:
-  void InternalReceive();
   void ProcessMessage(struct RingMessage *msg);
-  void SendNOP() {
-    RingMessage msg;
-    msg.header = MSG_NOP;
-    msg.next_receive = next_receive;
-    peer_next_receive_sent = next_receive;
-#if TRACE == 1
-    wait_in_send_nop = 123;
-#endif
-    Send(&msg);
-#if TRACE == 1
-    wait_in_send_nop = 0;
-#endif
-  }
-  int SendNOPp() {
-    return ((RingN + next_receive - peer_next_receive_sent) > NOP_THRESHOLD);
-  }
 };
 
 class CPURing : public Ring {
  public:
   std::atomic<int32_t> atomic_next_send;
-  void InitState(struct RingMessage *sendbuf, struct RingMessage *recvbuf, int send_count, int recv_count);
+  std::atomic<int32_t> atomic_receive_lock;
+  void InitState(struct RingMessage *sendbuf, struct RingMessage *recvbuf);
 
   void Print(const char *name);
   void Send(struct RingMessage *msg);
-  void Poll() {
-    InternalReceive();
-    if (SendNOPp()) SendNOP();
-  }
+  void Poll();
   void Drain();
  private:
-  void InternalReceive();
   void ProcessMessage(struct RingMessage *msg);
-  void SendNOP() {
-    RingMessage msg;
-    msg.header = MSG_NOP;
-    msg.next_receive = next_receive;
-    peer_next_receive_sent = next_receive;
-#if TRACE == 1
-    wait_in_send_nop = 123;
-#endif
-    Send(&msg);
-#if TRACE == 1
-    wait_in_send_nop = 0;
-#endif
-  }
-  int SendNOPp() {
-    return ((RingN + next_receive - peer_next_receive_sent) > NOP_THRESHOLD);
-  }
 };
 
 
