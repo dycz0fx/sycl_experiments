@@ -138,7 +138,7 @@ void CPURing::Poll()
 {
   int32_t lockwasbusy = atomic_receive_lock.exchange(1);
   if (lockwasbusy == 0) {
-    struct RingMessage *msg = &recvbuf[next_receive % RingN]; // msg ptr
+  struct RingMessage *msg = &recvbuf[next_receive % RingN]; // msg ptr
     int32_t sequence = msg->sequence;
     if (sequence == next_receive) {
       ProcessMessage(msg);

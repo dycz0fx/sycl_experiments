@@ -2,10 +2,9 @@
 #define RINGLIB2_H
 #import <atomic>
 
-#define TRACE 1
+#define TRACE 0
 
 constexpr int RingN = 1024;
-constexpr int NOP_THRESHOLD = 128;   /* N/4 ? See analysis */
 
 /* message types, all non-zero Non-zero acts as the ready flag*/
 #define MSG_IDLE 0
@@ -35,8 +34,7 @@ union RingMessages {
  * fast.  Atomic operations are only supported on local locations.
  *
  * Messages are transmitted using a single vector store instruction
- * of 64 bytes.  The first 32 bits are zero if the buffer is empty
- * and every message type must have a non-empty first 32 bits
+ * of 64 bytes.  The sequence field of each message is reserved
  * Each end maintains a write counter for its outgoing traffic
  * and read counter for its incoming traffic
  *
@@ -60,19 +58,17 @@ union RingMessages {
  *
  * 2) wait until
  *    (write_counter - peer_next_receive) < (RingN - 1)
- * while waiting, the sending thread can assist in receiving messages, and
- * should poll for any updates to peer_next_receive
+ * while waiting, the sending thread can assist in receiving messages
  *
  * 3) send the message (single MOVDIR64B on the host or ucs_ulong8 on the GPU
  *
  * Receiving works by 
- * 1) polling the next expected receive slot for non-zero
+ * 1) polling the next expected receive slot for the expected sequence number
  * 2) handling the message 
- * 3) clearing the first 32 bits of the just-received message slot
- * 4) incrementing the next_receive counter
- * 5) occasionally storing local next_receive to remote peer_next_receive
+ * 3) incrementing the next_receive counter
+ * 4) occasionally storing local next_receive to remote peer_next_receive
  *
- * For thread safety on receive, only one thread can be in the 1-5 critical 
+ * For thread safety on receive, only one thread can be in the 1-4 critical 
  * section (for now)
  *
  * an atomic exchange is used to seize the receive lock.
@@ -84,11 +80,6 @@ union RingMessages {
  * when next_write pointer is one less than peer_next_read pointer, 
  * the buffer is full
  *
- * must not send last message without returning credit
- * should return NOP with credit when half of credits waiting to return
- *
- * need to know how many credits waiting to return
- *   next_receive - next_received_sent
  */
 
 /* Handling of next_receive and peer_next_receive

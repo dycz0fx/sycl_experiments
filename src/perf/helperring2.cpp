@@ -661,28 +661,29 @@ int main(int argc, char *argv[]) {
     int send_count = loc_a2b_count;
     int recv_count = loc_b2a_count;
     std::cout << "GPUA send_count " << send_count << " recv_count " << recv_count << std::endl;
-    if (loc_athreads == 1) {
+    if (loc_athreads == -1) {
       ea = qa.single_task( [=]() {
 	  GPURing *gpua = new(ringspacea) GPURing(gpua_tx_mem, gpua_rx_mem);
 	  GPUThread(gpua, send_count, recv_count, loc_latency);
 	});
     } else {
-      assert(0);
       ea = qa.submit([&](sycl::handler &h) {
-	  auto out = sycl::stream(1024, 768, h);
+	  //auto out = sycl::stream(1024, 768, h);
 	  h.parallel_for_work_group(sycl::range(1), sycl::range(loc_athreads), [=](sycl::group<1> grp) {
-	      GPURing gpua(gpua_tx_mem, gpua_rx_mem);
+	      GPURing *gpua = new(ringspacea) GPURing(gpua_tx_mem, gpua_rx_mem);
 	      grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
 		  struct RingMessage msg;
 		  msg.header = MSG_PUT;
-		  msg.data[0] = 0xfeedface;
-		  msg.data[1] = it.get_global_id()[0];
-		  gpua.Send(&msg);
-		  if (recv_count > 0) gpua.Drain();
+		  int offset = it.get_global_id()[0];
+		  for (int i = offset; i < send_count; i += loc_athreads) {
+		    msg.data[1] = i;
+		    gpua->Send(&msg);
+		    if (recv_count > 0) gpua->Drain();
+		  }
 		});
-	      out << "GPUA next_send " << gpua.next_send << " next_receive " << gpua.next_receive << "\n";
+	      //out << "GPUA next_send " << gpua.next_send << " next_receive " << gpua.next_receive << "\n";
 	      
-	      while (gpua.next_receive < recv_count) gpua.Drain();
+	      while ((gpua->next_receive-RingN) < recv_count) gpua->Drain();
 	    });
 	});
     }
@@ -697,27 +698,28 @@ int main(int argc, char *argv[]) {
     int send_count = loc_b2a_count;
     int recv_count = loc_a2b_count;
     std::cout << "GPUB send_count " << send_count << " recv_count " << recv_count << std::endl;
-    if (loc_bthreads == 1) {
+    if (loc_bthreads == -1) {
       eb = qb.single_task( [=]() {
 	  GPURing *gpub = new(ringspaceb) GPURing(gpub_tx_mem, gpub_rx_mem);
 	  GPUThread(gpub, send_count, recv_count, loc_latency);
 	});
     } else {
-      assert(0);
       eb = qb.submit([&](sycl::handler &h) {
-	  auto out = sycl::stream(1024, 768, h);
+	  //auto out = sycl::stream(1024, 768, h);
 	  h.parallel_for_work_group(sycl::range(1), sycl::range(loc_bthreads), [=](sycl::group<1> grp) {
-	      GPURing gpub(gpub_tx_mem, gpub_rx_mem);
+	      GPURing *gpub = new(ringspaceb) GPURing(gpub_tx_mem, gpub_rx_mem);
 	      grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
 		  struct RingMessage msg;
 		  msg.header = MSG_PUT;
-		  msg.data[0] = 0xfeedface;
-		  msg.data[1] = it.get_global_id()[0];
-		  gpub.Send(&msg);
-		  if (recv_count > 0) gpub.Drain();
+		  int offset = it.get_global_id()[0];
+		  for (int i = offset; i < send_count; i += loc_bthreads) {
+		    msg.data[1] = i;
+		    gpub->Send(&msg);
+		    if (recv_count > 0) gpub->Drain();
+		  }
 		});
-	      out << "GPUB next_send " << gpub.next_send << " next_receive " << gpub.next_receive << "\n";
-	      while (gpub.next_receive < recv_count) gpub.Drain();
+	      //out << "GPUB next_send " << gpub.next_send << " next_receive " << gpub.next_receive << "\n";
+	      while ((gpub->next_receive - RingN) < recv_count) gpub->Drain();
 	    });
 	});
     }
@@ -770,7 +772,7 @@ int main(int argc, char *argv[]) {
   std::cout << " --size " << loc_size;
   if (loc_latency) std::cout << " --latency";
   std::cout << "  each " << nsec << " nsec " << mbps << "MB/s" << std::endl;
-  if (loc_a2b_count <= 2000) {
+  if (loc_b2a_count <= 2000) {
     for (int i = 0; i < loc_a2b_count; i += 1) {
       int32_t v = gpua_rx_mem_hostmap[i%RingN].sequence;
       if (v != (i + RingN) ) {
