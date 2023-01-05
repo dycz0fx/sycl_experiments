@@ -774,7 +774,7 @@ int main(int argc, char *argv[]) {
   std::cout << "  each " << nsec << " nsec " << mbps << "MB/s" << std::endl;
   if (loc_b2a_count <= 2000) {
     int err = 0;
-    for (int i = 0; i < loc_a2b_count; i += 1) {
+    for (int i = 0; i < loc_b2a_count; i += 1) {
       int32_t v = gpua_rx_mem_hostmap[i%RingN].sequence;
       if (v != (i + RingN) ) {
 	err += 1;
