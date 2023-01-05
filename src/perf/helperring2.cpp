@@ -773,20 +773,26 @@ int main(int argc, char *argv[]) {
   if (loc_latency) std::cout << " --latency";
   std::cout << "  each " << nsec << " nsec " << mbps << "MB/s" << std::endl;
   if (loc_b2a_count <= 2000) {
+    int err = 0;
     for (int i = 0; i < loc_a2b_count; i += 1) {
       int32_t v = gpua_rx_mem_hostmap[i%RingN].sequence;
       if (v != (i + RingN) ) {
+	err += 1;
 	printf("gpua_rx_mem[%d] == %d expected %d seq %i\n", i, v, i, gpub_rx_mem_hostmap[i%RingN].sequence);
       }
     }
+    printf("gpua_rx_mem errors %d\n", err);
   }
   if (loc_a2b_count <= 2000) {
+    int err = 0;
     for (int i = 0; i < loc_a2b_count; i += 1) {
       int32_t v = gpub_rx_mem_hostmap[i%RingN].sequence;
       if (v != (i + RingN)) {
+	err += 1;
 	printf("gpub_rx_mem[%d] == %d expected %d seq %d\n", i, v, i, gpub_rx_mem_hostmap[i%RingN].sequence);
       }
     }
+    printf("gpub_rx_mem errors %d\n", err);
   }
   fflush(stdout);
   printf("gpua next_peer_receive %d\n", gpua_rx_mem_hostmap[RingN].sequence);

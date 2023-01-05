@@ -25,6 +25,7 @@ void Ring::Print()
   //std::cout << "  peer next receive " << peer_next_receive << std::endl;
   std::cout << "  wait_in_send " << wait_in_send << std::endl;
   std::cout << "  wait_in_drain " << wait_in_drain << std::endl;
+  std::cout << "  send_wait_count " << send_wait_count << std::endl;
 }
 
 
@@ -55,23 +56,26 @@ void GPURing::Drain()
   #if TRACE == 1
   wait_in_drain = 5;
   #endif
-  while (recvbuf[next_receive % RingN].sequence == next_receive) Poll();
+  while (Poll());
   #if TRACE == 1
   wait_in_drain = 0;
   #endif
 }
 
 /* called by ring_send when we need space to send a message */
-void GPURing::Poll()
+int GPURing::Poll()
 {
   int32_t lockwasbusy = atomic_receive_lock.exchange(1);
+  int res = 0;
   if (lockwasbusy == 0) {
-    struct RingMessage *msg = &recvbuf[next_receive % RingN]; // msg ptr
-    sycl::atomic_fence(sycl::memory_order::acquire, sycl::memory_scope::system);
-    int32_t sequence = msg->sequence;
-    if (sequence == next_receive) {
+    struct RingMessage *msgp = &recvbuf[next_receive % RingN]; // msg ptr
+    sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
+    union RingMessages rm;
+    rm.data = ucl_ulong8((ulong8 *) msgp);
+    if (rm.msg.sequence == next_receive) {
       /* release lock ASAP */
-      ProcessMessage(msg);  // we're not holding lock here!
+      ProcessMessage(&rm.msg);  // we're not holding lock here!
+      res = 1;
       next_receive = next_receive + 1;
       if ((next_receive & 0xff) == 0) {
 	GPU_STORE_PEER_NEXT_RECV(next_receive);  // could happen OOO
@@ -80,6 +84,7 @@ void GPURing::Poll()
     atomic_receive_lock.store(0);  // release lock
   }
   // lock was already taken if we get here, so just return
+  return(res);
 }
 
 
@@ -97,7 +102,11 @@ void GPURing::Send(struct RingMessage *msg)
   #if TRACE == 1
   wait_in_send = 117;
   #endif
-  while ((my_send_index - LOAD_PEER_NEXT_RECV()) > (RingN - 10));
+  while ((my_send_index - LOAD_PEER_NEXT_RECV()) > (RingN - 10)) {
+    send_wait_count += 1;
+    sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
+  }
+    
   #if TRACE == 1
   wait_in_send = 0;
   #endif
@@ -134,19 +143,22 @@ void CPURing::InitState(struct RingMessage *sendbuf, struct RingMessage *recvbuf
  * can work in-place
  */
 
-void CPURing::Poll()
+int CPURing::Poll()
 {
   int32_t lockwasbusy = atomic_receive_lock.exchange(1);
+  int res = 0;
   if (lockwasbusy == 0) {
   struct RingMessage *msg = &recvbuf[next_receive % RingN]; // msg ptr
     int32_t sequence = msg->sequence;
     if (sequence == next_receive) {
       ProcessMessage(msg);
+      res = 1;
       next_receive = next_receive + 1;
       if ((next_receive & 0xff) == 0) STORE_PEER_NEXT_RECV(next_receive);
     }
     atomic_receive_lock.store(0);  // release lock
   }
+  return (res);
 }
 
 #define cpu_relax() asm volatile("rep; nop")
@@ -166,7 +178,10 @@ void CPURing::Send(RingMessage *msg)
   #if TRACE == 1
   wait_in_send = 117;
   #endif
-  while ((my_send_index - LOAD_PEER_NEXT_RECV()) > (RingN - 10)) cpu_relax();
+  while ((my_send_index - LOAD_PEER_NEXT_RECV()) > (RingN - 10)) {
+    send_wait_count += 1;
+    cpu_relax();
+  }
   #if TRACE == 1
   wait_in_send = 0;
   #endif
@@ -185,7 +200,7 @@ void CPURing::Drain()
   #if TRACE == 1
   wait_in_drain = 5;
   #endif
-  while (recvbuf[next_receive % RingN].sequence == next_receive) Poll();
+  while (Poll());
   #if TRACE == 1
   wait_in_drain = 0;
   #endif

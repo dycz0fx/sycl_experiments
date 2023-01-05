@@ -2,7 +2,7 @@
 #define RINGLIB2_H
 #import <atomic>
 
-#define TRACE 0
+#define TRACE 1
 
 constexpr int RingN = 1024;
 
@@ -123,6 +123,7 @@ class Ring {
   // accounting and debug from here down
   int32_t wait_in_send;
   int32_t wait_in_drain;
+  int64_t send_wait_count;
   // functions
   void Print();
 
@@ -141,7 +142,7 @@ class GPURing : public Ring {
     
   void Print(const char *name);  // memory may not be addressible
   void Send(struct RingMessage *msg);
-  void Poll();
+  int Poll();
   void Drain();  // call poll until there are no messages immediately available
  private:
   void ProcessMessage(struct RingMessage *msg);
@@ -155,7 +156,7 @@ class CPURing : public Ring {
 
   void Print(const char *name);
   void Send(struct RingMessage *msg);
-  void Poll();
+  int Poll();
   void Drain();
  private:
   void ProcessMessage(struct RingMessage *msg);
