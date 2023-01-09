@@ -2,7 +2,7 @@
 #define RINGLIB2_H
 #import <atomic>
 
-#define TRACE 1
+#define TRACE 0
 
 constexpr int RingN = 1024;
 
@@ -135,6 +135,7 @@ class GPURing : public Ring {
   int32_t receive_lock;
   // ordering may be excessive
   sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_next_send;
+  sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_next_receive;
   sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_receive_lock;
   
   // must be called on the GPU!
@@ -142,7 +143,9 @@ class GPURing : public Ring {
     
   void Print(const char *name);  // memory may not be addressible
   void Send(struct RingMessage *msg);
+  void MultiReceive();
   int Poll();
+  void Discard(int32_t seq);
   void Drain();  // call poll until there are no messages immediately available
  private:
   void ProcessMessage(struct RingMessage *msg);
@@ -157,6 +160,7 @@ class CPURing : public Ring {
   void Print(const char *name);
   void Send(struct RingMessage *msg);
   int Poll();
+  void Discard(int32_t seq);
   void Drain();
  private:
   void ProcessMessage(struct RingMessage *msg);

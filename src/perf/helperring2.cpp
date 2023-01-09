@@ -20,6 +20,7 @@
 #include <malloc.h>
 #include "uncached.cpp"
 #include "ringlib2.cpp"
+#include <omp.h>
 #include <new>   // in order to use placement new
 
 void dbprintf(int line, const char *format, ...)
@@ -41,7 +42,6 @@ void dbprintf(int line, const char *format, ...)
 /* option codes */
 #define CMD_A2B_COUNT 1001
 #define CMD_B2A_COUNT 1002
-#define CMD_SIZE 1003
 #define CMD_HELP 1004
 #define CMD_VALIDATE 1005
 #define CMD_CPU 1006
@@ -52,16 +52,17 @@ void dbprintf(int line, const char *format, ...)
 #define CMD_B 1025
 #define CMD_ATHREADS 1026
 #define CMD_BTHREADS 1027
+#define CMD_DISCARD 1028
 
 /* option global variables */
 // specify defaults
 uint64_t glob_a2b_count = 0;
 uint64_t glob_b2a_count = 0;
-uint64_t glob_size = 8;
 int glob_validate = 0;
 int glob_cpu = 0;
 int glob_interlock = 0;
 int glob_latency = 0;
+int glob_discard = 0;
 int glob_athreads = 1;
 int glob_bthreads = 1;
 int glob_a2b_buf = 0;  /* 0: cpu 1: p0 2: p1 3: t0 4: t1 */
@@ -78,12 +79,12 @@ void Usage()
     "--b2abuf p0|p1|t0|t1|c  set location of gpu-b to gpu=a buffer\n"
     "--a2bcount <n>          set number of iterations\n"
     "--b2acount <n>          set number of iterations\n"
-    "--size <n>              set size\n"
     "--athreads <n>          number threads for end a\n"
     "--bthreads <n>          number threads for end b\n"
     "--help                  usage message\n"
     "--validate              set and check data\n"
-    "--interlock             wait for responses\n";
+    "--latency               wait for responses\n"
+    "--discard               discard receive traffic\n";
   std::cout << std::endl;
   exit(1);
 }
@@ -106,6 +107,16 @@ int location_to_code(const char *s)
   assert(0);
 }
 
+const char *code_to_location(int code)
+{
+  if (code == LOC_CPU) return("c");
+  if (code == LOC_PVC0) return("p0");
+  if (code == LOC_PVC1) return("p1");
+  if (code == LOC_TILE0) return("t0");
+  if (code == LOC_TILE1) return("t1");
+  return("unknown");
+}
+
 void ProcessArgs(int argc, char **argv)
 {
   const option long_opts[] = {
@@ -115,12 +126,12 @@ void ProcessArgs(int argc, char **argv)
     {"b2abuf", required_argument, nullptr, CMD_B2A_BUF},
     {"a", required_argument, nullptr, CMD_A},
     {"b", required_argument, nullptr, CMD_B},
-    {"size", required_argument, nullptr, CMD_SIZE},
     {"athreads", required_argument, nullptr, CMD_ATHREADS},
     {"bthreads", required_argument, nullptr, CMD_BTHREADS},
     {"help", no_argument, nullptr, CMD_HELP},
     {"validate", no_argument, nullptr, CMD_VALIDATE},
     {"latency", no_argument, nullptr, CMD_LATENCY},
+    {"discard", no_argument, nullptr, CMD_DISCARD},
     {nullptr, no_argument, nullptr, 0}
   };
   while (true)
@@ -132,47 +143,42 @@ void ProcessArgs(int argc, char **argv)
 	{
 	case CMD_A2B_COUNT: {
 	  glob_a2b_count = std::stoi(optarg);
-	  std::cout << "--a2bcount=" << glob_a2b_count << std::endl;
+	  //std::cout << "--a2bcount=" << glob_a2b_count << std::endl;
 	  break;
 	}
 	case CMD_B2A_COUNT: {
 	  glob_b2a_count = std::stoi(optarg);
-	  std::cout << "--b2acount=" << glob_b2a_count << std::endl;
+	  //std::cout << "--b2acount=" << glob_b2a_count << std::endl;
 	  break;
 	}
 	case CMD_A: {
 	  glob_a = location_to_code(optarg);
-	  std::cout << "--a=" << glob_a << std::endl;
+	  //std::cout << "--a=" << glob_a << std::endl;
 	  break;
 	}
 	case CMD_B: {
 	  glob_b = location_to_code(optarg);
-	  std::cout << "--b=" << glob_b << std::endl;
+	  //std::cout << "--b=" << glob_b << std::endl;
 	  break;
 	}
 	case CMD_A2B_BUF: {
 	  glob_a2b_buf = location_to_code(optarg);
-	  std::cout << "--a2bbuf=" << glob_a2b_buf << std::endl;
+	  //std::cout << "--a2bbuf=" << glob_a2b_buf << std::endl;
 	  break;
 	}
 	case CMD_B2A_BUF: {
 	  glob_b2a_buf = location_to_code(optarg);
-	  std::cout << "--b2abuf=" << glob_b2a_buf << std::endl;
-	  break;
-	}
-	case CMD_SIZE: {
-	  glob_size = std::stoi(optarg);
-	  std::cout << "--size=" << glob_size << std::endl;
+	  //std::cout << "--b2abuf=" << glob_b2a_buf << std::endl;
 	  break;
 	}
 	case CMD_ATHREADS: {
 	  glob_athreads = std::stoi(optarg);
-	  std::cout << "--athreads=" << glob_athreads << std::endl;
+	  //std::cout << "--athreads=" << glob_athreads << std::endl;
 	  break;
 	}
 	case CMD_BTHREADS: {
 	  glob_bthreads = std::stoi(optarg);
-	  std::cout << "--bthreads=" << glob_bthreads << std::endl;
+	  //std::cout << "--bthreads=" << glob_bthreads << std::endl;
 	  break;
 	}
 	case CMD_HELP: {
@@ -185,7 +191,11 @@ void ProcessArgs(int argc, char **argv)
 	}
 	case CMD_LATENCY: {
 	  glob_latency = 1;
-	  std::cout << "--latency=" << glob_latency << std::endl;
+	  //std::cout << "--latency=" << glob_latency << std::endl;
+	  break;
+	}
+	case CMD_DISCARD: {
+	  glob_discard = 1;
 	  break;
 	}
 	default: {
@@ -211,6 +221,7 @@ struct CPURingCommand {
   int send_count;
   int recv_count;
   int latency_flag;
+  int discard_flag;
 };
   
 constexpr size_t BUFSIZE = (1L << 20);  //allocate 1 MB usable
@@ -221,11 +232,12 @@ void CPUThread(CPURingCommand *r)
   int send_count = r->send_count;
   int recv_count = r->recv_count;
   int latencyflag = r->latency_flag;
+  int discardflag = r->discard_flag;
   struct RingMessage msg;
   msg.header = MSG_PUT;
   msg.data[0] = 0xdeadbeef;
   for (int i = 0; i < send_count; i += 1) {
-    msg.data[1] = i;
+    //msg.data[1] = i;
     s->Send(&msg);
     if (latencyflag) {
       while ((s->next_receive-RingN) < i) {
@@ -235,7 +247,10 @@ void CPUThread(CPURingCommand *r)
       s->Drain();  // rate balancing
     }
   }
-  while ((s->next_receive-RingN) < recv_count) s->Drain();
+  if (discardflag) s->Discard(recv_count+RingN);
+  else {
+    while ((s->next_receive-RingN) < recv_count) s->Drain();
+  }
 }
 
 void *ThreadFn(void * arg)
@@ -264,7 +279,7 @@ void *Joiner(void *arg)
   return(NULL);
 }
 
-void GPUThread(GPURing *s, int send_count, int recv_count, int latency_flag)
+void GPUThread(GPURing *s, int send_count, int recv_count, int latency_flag, int discard_flag)
 {
   struct RingMessage msg;
   msg.header = MSG_PUT;
@@ -274,7 +289,10 @@ void GPUThread(GPURing *s, int send_count, int recv_count, int latency_flag)
     s->Send(&msg);
     if (recv_count > 0) s->Drain();
   }
-  while ((s->next_receive-RingN) < recv_count) s->Drain();
+  if (discard_flag) s->Discard(recv_count+RingN);
+  else {
+    while ((s->next_receive-RingN) < recv_count) s->Drain();
+  }
 }
 
 template<typename T>
@@ -301,16 +319,20 @@ T *get_mmap_address(T * device_ptr, size_t size, sycl::queue Q) {
 }
 
 int main(int argc, char *argv[]) {
+  usleep(5000 * omp_get_thread_num()); // do this to avoid race condition while printing
+  std::cout << "Number of available threads: " << omp_get_num_threads() << std::endl;
+  // each thread can also get its own number
+  std::cout << "Current thread number: " << omp_get_thread_num() << std::endl;
   ProcessArgs(argc, argv);
   uint64_t loc_a2b_count = glob_a2b_count;
   uint64_t loc_b2a_count = glob_b2a_count;
   int loc_a2b_buf = glob_a2b_buf;
   int loc_b2a_buf = glob_b2a_buf;
-  uint64_t loc_size = glob_size;
   int loc_athreads = glob_athreads;
   int loc_bthreads = glob_bthreads;
   int loc_validate = glob_validate;
   int loc_latency = glob_latency;
+  int loc_discard = glob_discard;
   int loc_a = glob_a;
   int loc_b = glob_b;
 
@@ -510,10 +532,10 @@ int main(int argc, char *argv[]) {
     else if (loc_a2b_buf == LOC_TILE1) gpub_rx_mem_hostmap = tile1_a2b_hostmap;
     else assert(0);
   }
-  std::cout << "gpua_tx_mem" << gpua_tx_mem << std::endl;
-  std::cout << "gpub_rx_mem" << gpub_rx_mem << std::endl;
-  std::cout << "gpub_tx_mem" << gpub_tx_mem << std::endl;
-  std::cout << "gpua_rx_mem" << gpua_rx_mem << std::endl;
+  //std::cout << "gpua_tx_mem" << gpua_tx_mem << std::endl;
+  //std::cout << "gpub_rx_mem" << gpub_rx_mem << std::endl;
+  //std::cout << "gpub_tx_mem" << gpub_tx_mem << std::endl;
+  //std::cout << "gpua_rx_mem" << gpua_rx_mem << std::endl;
 		       
   CPURing *cpua;
   CPURing *cpub;
@@ -551,8 +573,6 @@ int main(int argc, char *argv[]) {
   unsigned long start_time, end_time;
   struct timespec ts_start, ts_end;
   
-  clock_gettime(CLOCK_REALTIME, &ts_start);
-  start_time = rdtsc();
 
   sycl::event ea;
   sycl::event eb;
@@ -647,11 +667,16 @@ int main(int argc, char *argv[]) {
   acmd.send_count = loc_a2b_count;
   acmd.recv_count = loc_b2a_count;
   acmd.latency_flag = loc_latency;
+  acmd.discard_flag = loc_discard;
   struct CPURingCommand bcmd;
   bcmd.cpur = cpu_host_b;
   bcmd.send_count = loc_b2a_count;
   bcmd.recv_count = loc_a2b_count;
   bcmd.latency_flag = loc_latency;
+  bcmd.discard_flag = loc_discard;
+
+  clock_gettime(CLOCK_REALTIME, &ts_start);
+  start_time = rdtsc();
   
   if (loc_a == LOC_CPU) {
     pthread_create(&athread, &pt_attributes, ThreadFn, (void *) &acmd);
@@ -660,11 +685,11 @@ int main(int argc, char *argv[]) {
   } else {
     int send_count = loc_a2b_count;
     int recv_count = loc_b2a_count;
-    std::cout << "GPUA send_count " << send_count << " recv_count " << recv_count << std::endl;
+    //std::cout << "GPUA send_count " << send_count << " recv_count " << recv_count << std::endl;
     if (loc_athreads == -1) {
       ea = qa.single_task( [=]() {
 	  GPURing *gpua = new(ringspacea) GPURing(gpua_tx_mem, gpua_rx_mem);
-	  GPUThread(gpua, send_count, recv_count, loc_latency);
+	  GPUThread(gpua, send_count, recv_count, loc_latency, loc_discard);
 	});
     } else {
       ea = qa.submit([&](sycl::handler &h) {
@@ -674,16 +699,40 @@ int main(int argc, char *argv[]) {
 	      grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
 		  struct RingMessage msg;
 		  msg.header = MSG_PUT;
+		  int si = it.get_global_id()[0];  // send index
+		  int ri = it.get_global_id()[0];  // receive index
+		  while (si < send_count) {
+		    if (si < send_count) {
+		      msg.data[1] = si;
+		      gpua->Send(&msg);
+		      si += loc_athreads;
+		    }
+		    if (ri < recv_count) {
+		      gpua->MultiReceive();
+		      ri += loc_athreads;
+		    }
+		  }
+		  if (loc_discard) gpua->Discard(recv_count + RingN);
+		  else {
+		    while ((gpua->next_receive-RingN) < recv_count) gpua->Drain();
+		  }
+
+#if 0
+		  struct RingMessage msg;
+		  msg.header = MSG_PUT;
 		  int offset = it.get_global_id()[0];
 		  for (int i = offset; i < send_count; i += loc_athreads) {
 		    msg.data[1] = i;
 		    gpua->Send(&msg);
 		    if (recv_count > 0) gpua->Drain();
 		  }
+#endif
 		});
 	      //out << "GPUA next_send " << gpua.next_send << " next_receive " << gpua.next_receive << "\n";
 	      
+#if 0
 	      while ((gpua->next_receive-RingN) < recv_count) gpua->Drain();
+#endif
 	    });
 	});
     }
@@ -697,11 +746,11 @@ int main(int argc, char *argv[]) {
   } else {
     int send_count = loc_b2a_count;
     int recv_count = loc_a2b_count;
-    std::cout << "GPUB send_count " << send_count << " recv_count " << recv_count << std::endl;
+    //std::cout << "GPUB send_count " << send_count << " recv_count " << recv_count << std::endl;
     if (loc_bthreads == -1) {
       eb = qb.single_task( [=]() {
 	  GPURing *gpub = new(ringspaceb) GPURing(gpub_tx_mem, gpub_rx_mem);
-	  GPUThread(gpub, send_count, recv_count, loc_latency);
+	  GPUThread(gpub, send_count, recv_count, loc_latency, loc_discard);
 	});
     } else {
       eb = qb.submit([&](sycl::handler &h) {
@@ -711,15 +760,25 @@ int main(int argc, char *argv[]) {
 	      grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
 		  struct RingMessage msg;
 		  msg.header = MSG_PUT;
-		  int offset = it.get_global_id()[0];
-		  for (int i = offset; i < send_count; i += loc_bthreads) {
-		    msg.data[1] = i;
-		    gpub->Send(&msg);
-		    if (recv_count > 0) gpub->Drain();
+		  int si = it.get_global_id()[0];  // send index
+		  int ri = it.get_global_id()[0];  // receive index
+		  while (si < send_count) {
+		    if (si < send_count) {
+		      msg.data[1] = si;
+		      gpub->Send(&msg);
+		      si += loc_bthreads;
+		    }
+		    if (ri < recv_count) {
+		      gpub->MultiReceive();
+		      ri += loc_bthreads;
+		    }
 		  }
+		  if (loc_discard) gpub->Discard(recv_count + RingN);
+		  else {
+		    while ((gpub->next_receive-RingN) < recv_count) gpub->Drain();
+		  }
+
 		});
-	      //out << "GPUB next_send " << gpub.next_send << " next_receive " << gpub.next_receive << "\n";
-	      while ((gpub->next_receive - RingN) < recv_count) gpub->Drain();
 	    });
 	});
     }
@@ -744,7 +803,7 @@ int main(int argc, char *argv[]) {
   //std::cout << "got completion flags" << std::endl;
   if (acompletion) pthread_join(ajoiner, NULL);
   if (bcompletion) pthread_join(bjoiner, NULL);
-  std::cout << "joined complete joiners" << std::endl;
+  //std::cout << "joined complete joiners" << std::endl;
   if ((loc_a != LOC_CPU) && acompletion) printduration("gpua kernel ", ea);
   if ((loc_b != LOC_CPU) && bcompletion) printduration("gpub kernel ", eb);
   std::cout << "printduration" << std::endl;
@@ -758,20 +817,19 @@ int main(int argc, char *argv[]) {
     fcount = loc_a2b_count;
   else
     fcount = loc_b2a_count;
-  double size = loc_size;
-  double mbps = (size * 1000) / (elapsed / fcount);
   double nsec = elapsed / fcount;
   std::cout << "elapsed " << elapsed << " fcount " << fcount << std::endl;
   std::cout << argv[0];
-  std::cout << " --b2a_count " << loc_b2a_count;
-  std::cout << " --a2b_count " << loc_a2b_count;
-  std::cout << " --b2a_buf " << loc_b2a_buf;
-  std::cout << " --a2b_buf " << loc_a2b_buf;
-  std::cout << " --b " << loc_b;
-  std::cout << " --a " << loc_a;
-  std::cout << " --size " << loc_size;
+  std::cout << " --a2b_count=" << loc_a2b_count;
+  std::cout << " --b2a_count=" << loc_b2a_count;
+  std::cout << " --a2b_buf=" << code_to_location(loc_a2b_buf);
+  std::cout << " --b2a_buf=" << code_to_location(loc_b2a_buf);
+  std::cout << " --a=" << code_to_location(loc_a);
+  std::cout << " --b=" << code_to_location(loc_b);
+  std::cout << " --athreads=" << loc_athreads;
+  std::cout << " --bthreads=" << loc_bthreads;
   if (loc_latency) std::cout << " --latency";
-  std::cout << "  each " << nsec << " nsec " << mbps << "MB/s" << std::endl;
+  std::cout << " nsec=" << nsec << std::endl;
   if (loc_b2a_count <= 2000) {
     int err = 0;
     for (int i = 0; i < loc_b2a_count; i += 1) {
@@ -795,17 +853,19 @@ int main(int argc, char *argv[]) {
     printf("gpub_rx_mem errors %d\n", err);
   }
   fflush(stdout);
-  printf("gpua next_peer_receive %d\n", gpua_rx_mem_hostmap[RingN].sequence);
-  printf("gpub next_peer_receive %d\n", gpub_rx_mem_hostmap[RingN].sequence);
-  if (loc_a == LOC_CPU) {
-    cpua->Print("cpua");
-  } else {
-    ringspacea_host_map->Print("gpua");
-  }
-  if (loc_b == LOC_CPU) {
-    cpub->Print("cpub");
-  } else {
-    ringspaceb_host_map->Print("gpub");
+  if ((acompletion == 0) || (bcompletion == 0)) {
+    printf("gpua next_peer_receive %d\n", gpua_rx_mem_hostmap[RingN].sequence);
+    printf("gpub next_peer_receive %d\n", gpub_rx_mem_hostmap[RingN].sequence);
+    if (loc_a == LOC_CPU) {
+      cpua->Print("cpua");
+    } else {
+      ringspacea_host_map->Print("gpua");
+    }
+    if (loc_b == LOC_CPU) {
+      cpub->Print("cpub");
+    } else {
+      ringspaceb_host_map->Print("gpub");
+    }
   }
   std::cout << "main returning" << std::endl;
   return 0;

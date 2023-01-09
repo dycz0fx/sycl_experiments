@@ -31,7 +31,7 @@ void Ring::Print()
 
 //============== GPU Versions
 
-GPURing::GPURing(struct RingMessage *sendbuf, struct RingMessage *recvbuf) : atomic_next_send(next_send), atomic_receive_lock(receive_lock)
+GPURing::GPURing(struct RingMessage *sendbuf, struct RingMessage *recvbuf) : atomic_next_send(next_send), atomic_receive_lock(receive_lock), atomic_next_receive(next_receive)
 {
   this->next_send = RingN;
   this->next_receive = RingN;
@@ -60,6 +60,47 @@ void GPURing::Drain()
   #if TRACE == 1
   wait_in_drain = 0;
   #endif
+}
+
+/* does minimal work by waiting for and discarding messages up to seq */
+void GPURing::Discard(int32_t seq)
+{
+  int32_t current = next_receive;
+  union RingMessages rm;
+  struct RingMessage *mp;
+  do {
+    do {
+      mp = &(recvbuf[current % RingN]);  // ring ptr
+      sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
+      rm.data = ucl_ulong8((ulong8 *) mp);
+    } while (rm.msg.sequence != current);
+    GPU_STORE_PEER_NEXT_RECV(current);
+    current += 0x100;
+  } while (current < seq);
+  current = seq;
+  do {
+    mp = &(recvbuf[current % RingN]);  // ring ptr
+    sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
+    rm.data = ucl_ulong8((ulong8 *) mp);
+  } while (rm.msg.sequence != current);
+  GPU_STORE_PEER_NEXT_RECV(current);
+}
+
+/* multithreaded version */
+/* once you add allocate a receive index, you must wait until it actually arrives */
+void GPURing::MultiReceive()
+{
+  int32_t my_recv_index = atomic_next_receive.fetch_add(1);   // allocate slot
+  struct RingMessage *mp = &(recvbuf[my_recv_index % RingN]);  // ring ptr
+  union RingMessages rm;
+  do {
+    sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
+    rm.data = ucl_ulong8((ulong8 *) mp);
+  } while (rm.msg.sequence != my_recv_index);
+  if ((my_recv_index & 0xff) == 0) {
+    GPU_STORE_PEER_NEXT_RECV(my_recv_index);  // could happen OOO
+  }
+  ProcessMessage(&rm.msg);
 }
 
 /* called by ring_send when we need space to send a message */
@@ -103,7 +144,7 @@ void GPURing::Send(struct RingMessage *msg)
   wait_in_send = 117;
   #endif
   while ((my_send_index - LOAD_PEER_NEXT_RECV()) > (RingN - 10)) {
-    send_wait_count += 1;
+    //send_wait_count += 1;
     sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
   }
     
@@ -179,7 +220,7 @@ void CPURing::Send(RingMessage *msg)
   wait_in_send = 117;
   #endif
   while ((my_send_index - LOAD_PEER_NEXT_RECV()) > (RingN - 10)) {
-    send_wait_count += 1;
+    //send_wait_count += 1;
     cpu_relax();
   }
   #if TRACE == 1
@@ -205,6 +246,27 @@ void CPURing::Drain()
   wait_in_drain = 0;
   #endif
 }
+
+/* does minimal work by waiting for and discarding messages up to seq */
+void CPURing::Discard(int32_t seq)
+{
+  int32_t current = next_receive;
+  union RingMessages rm;
+  struct RingMessage *mp;
+  do {
+    do {
+      mp = &(recvbuf[current % RingN]);  // ring ptr
+    } while (mp->sequence != current);
+    STORE_PEER_NEXT_RECV(current);
+    current += 0x100;
+  } while (current < seq);
+  current = seq;
+  do {
+    mp = &(recvbuf[current % RingN]);  // ring ptr
+  } while (mp->sequence != current);
+  STORE_PEER_NEXT_RECV(current);
+}
+
 
 void CPURing::Print(const char *name)
 {
