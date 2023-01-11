@@ -141,6 +141,17 @@ class Ring {
   void Print();
 
 };
+
+class GPUTrack {
+ public:
+  int32_t lock;
+  int32_t next_receive;
+  int32_t pad[6];
+  sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_lock;
+  GPUTrack() : atomic_lock(lock) { }
+};
+
+
 // GPU uses sycl::atomic_ref rather than std::atomic
 class GPURing : public Ring {
  public:
@@ -148,8 +159,7 @@ class GPURing : public Ring {
   int32_t next_send;        // next slot in sendbuf
   int32_t credit_groups[GroupN]; // atomic, set up at point of use
   int32_t next_track;
-  int32_t track_lock[TrackN];  // atomic, set up at point of use
-  int32_t track_next_receive[TrackN]; // used within track_lock so not atomic
+  GPUTrack track[TrackN];
   // ordering may be excessive
   sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_receive_count;
   

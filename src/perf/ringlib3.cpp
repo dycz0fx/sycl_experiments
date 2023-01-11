@@ -39,9 +39,9 @@ GPURing::GPURing(struct RingMessage *sendbuf, struct RingMessage *recvbuf) : ato
   for (int i = 0; i < GroupN; i += 1) {
     this->credit_groups[i] = (i == 0)? 1:0;  // phantom carry in for group 0
   }
+  // this should be in the GPUTrack constructor, somehow
   for (int i = 0; i < TrackN; i += 1) {
-    this->track_lock[i] = 0;
-    this->track_next_receive[i] = RingN + i;  // in place of next_receive
+    this->track[i].next_receive = RingN + i;  // in place of next_receive
   }
   GPU_STORE_PEER_NEXT_RECV(RingN);
 #if TRACE == 1
@@ -88,11 +88,10 @@ int GPURing::Poll()
 {
   int res = 0;
   int32_t my_track = atomic_next_track.fetch_add(1) % TrackN;
-  sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_track_lock(track_lock[my_track]);
 
-  int32_t lockwasbusy = atomic_track_lock.exchange(1);
+  int32_t lockwasbusy = track[my_track].atomic_lock.exchange(1); // try track lock
   if (lockwasbusy == 0) {
-    int32_t my_slot = track_next_receive[my_track];
+    int32_t my_slot = track[my_track].next_receive;
     struct RingMessage *msgp = &recvbuf[my_slot % RingN]; // msg ptr
     union RingMessages rm;
     sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
@@ -100,7 +99,7 @@ int GPURing::Poll()
     if (rm.msg.sequence == my_slot) {
       ProcessMessage(&rm.msg);
       res = 1;
-      track_next_receive[my_track] += TrackN;   // may be picked up by another thread next
+      track[my_track].next_receive += TrackN;   // may be picked up by another thread next
       int32_t my_group = groupof(my_slot);
       /* note reduce contention on atomic_credit_group by first acccumulating
 	 in the track counter */
@@ -119,7 +118,7 @@ int GPURing::Poll()
       }
     }
     sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system);
-    atomic_track_lock.store(0);
+    track[my_track].atomic_lock.store(0); // release track lock
   }
   return (res);
 }
@@ -165,7 +164,7 @@ void GPURing::Print(const char *name)
   }
   std::cout << "  next_track " << next_track << std::endl;
   for (int i = 0; i < TrackN; i += 1) {
-    std::cout << "  track_next_receive[" << i << "] = " << track_next_receive[i] << std::endl;
+    std::cout << "  track[" << i << "].next_receive = " << track[i].next_receive << std::endl;
 
   }
   
