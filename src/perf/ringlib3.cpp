@@ -36,9 +36,7 @@ GPURing::GPURing(struct RingMessage *sendbuf, struct RingMessage *recvbuf) : ato
   this->sendbuf = sendbuf;
   this->recvbuf = recvbuf;
   this->receive_count = 0;
-  for (int i = 0; i < GroupN; i += 1) {
-    this->credit_groups[i] = (i == 0)? 1:0;  // phantom carry in for group 0
-  }
+  this->groups[0].atomic_credit.fetch_add(1); // initial carry in
   // this should be in the GPUTrack constructor, somehow
   for (int i = 0; i < TrackN; i += 1) {
     this->track[i].next_receive = RingN + i;  // in place of next_receive
@@ -91,7 +89,7 @@ int GPURing::Poll()
 
   int32_t lockwasbusy = track[my_track].atomic_lock.exchange(1); // try track lock
   if (lockwasbusy == 0) {
-    int32_t my_slot = track[my_track].next_receive;
+    int32_t my_slot = track[my_track].atomic_next_receive.load();
     struct RingMessage *msgp = &recvbuf[my_slot % RingN]; // msg ptr
     union RingMessages rm;
     sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
@@ -99,58 +97,84 @@ int GPURing::Poll()
     if (rm.msg.sequence == my_slot) {
       ProcessMessage(&rm.msg);
       res = 1;
-      track[my_track].next_receive += TrackN;   // may be picked up by another thread next
+      track[my_track].atomic_next_receive += TrackN;   // may be picked up by another thread next
       int32_t my_group = groupof(my_slot);
       /* note reduce contention on atomic_credit_group by first acccumulating
 	 in the track counter */
       int32_t my_next_receive = roundup(my_slot);
       for (;;) {
-	sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_credit_group(credit_groups[my_group]);
-	if (atomic_credit_group.fetch_add(1) == MsgsPerGroup) {
-	  atomic_credit_group.fetch_add(-(MsgsPerGroup+1));
+	if (groups[my_group].atomic_credit.fetch_add(1) == MsgsPerGroup) {
+	  groups[my_group].atomic_credit.fetch_add(-(MsgsPerGroup+1));
 	  /* my_next_receive is the slot after the end of my_group */
-	  GPU_STORE_PEER_NEXT_RECV(my_next_receive);
+	  //GPU_STORE_PEER_NEXT_RECV(my_next_receive);  // could do this only at the end of the loop
+	  // reread Pardo message about goiing back in time (or add fence here)
 	  my_group = (my_group + 1) % GroupN;
 	  my_next_receive += MsgsPerGroup;
 	} else {
+	  // move GPU_STORE_NEXT_RECV here to minimize time reversal opportunities
+	  GPU_STORE_PEER_NEXT_RECV(my_next_receive - MsgsPerGroup);
 	  break;
 	}
       }
     }
-    sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system);
+    sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system); // force update of next_recv
     track[my_track].atomic_lock.store(0); // release track lock
   }
   return (res);
 }
 
-
-
-// on entry type and data are filled in
-// instead of saddling "send" with updating the credits, just let send_nop
-// do it 4 times per ring cycle
-// the poll thread has to be there anyway in case there isn't any send activity
-
-void GPURing::Send(struct RingMessage *msg)
+// count must be less than RingN!  Should we check?
+void GPURing::Send(struct RingMessage *msgp, int count)
 {
-  int32_t my_send_index = atomic_next_send.fetch_add(1);   // allocate slot
-  struct RingMessage *mp = &(sendbuf[my_send_index % RingN]);  // ring ptr
+  int32_t my_send_index = atomic_next_send.fetch_add(count);   // allocate slots
   // wait for previous uses of the buffer to be complete
-  msg->sequence = my_send_index;
-  #if TRACE == 1
-  wait_in_send = 117;
-  #endif
-  while ((my_send_index - LOAD_PEER_NEXT_RECV()) > (RingN - 10)) {
-    //send_wait_count += 1;
+  while (((my_send_index+count) - LOAD_PEER_NEXT_RECV()) > RingN) {
     sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
   }
-    
-  #if TRACE == 1
-  wait_in_send = 0;
-  #endif
-  ucs_ulong8((ulong8 *) mp, *((ulong8 *) msg)); // could be OOO
+  while (count--) {
+    union RingMessages rm;
+    struct RingMessage *mp;
+    mp = &(sendbuf[my_send_index % RingN]);  // ring ptr
+    rm.msg = *msgp++;
+    rm.msg.sequence = my_send_index;
+    ucs_ulong8((ulong8 *) mp, rm.data); // could be OOO
+    my_send_index += 1;
+  }
   // is this fence actually needed?
   sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system);
 }
+
+void GPURing::Send(RingMessage *msgp)
+{
+  int32_t my_send_index = atomic_next_send.fetch_add(1);   // allocate slot
+  struct RingMessage *mp = &(sendbuf[my_send_index % RingN]);  // ring ptr
+  union RingMessages rm;
+  rm.msg = *msgp;
+  rm.msg.sequence = my_send_index;
+  // wait for previous uses of the buffer to be complete
+  while ((my_send_index - LOAD_PEER_NEXT_RECV()) > RingN) {
+    sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
+  }
+  ucs_ulong8((ulong8 *) mp, rm.data); // could be OOO
+  // is this fence actually needed?
+  sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system);
+}
+
+#if 0
+void GPURing::Send(RingMessage *msgp)
+{
+  int32_t my_send_index = atomic_next_send.fetch_add(1);   // allocate slot
+  struct RingMessage *mp = &(sendbuf[my_send_index % RingN]);  // ring ptr
+  msgp->sequence = my_send_index;
+  // wait for previous uses of the buffer to be complete
+  while ((my_send_index - LOAD_PEER_NEXT_RECV()) > RingN) {
+    sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
+  }
+  ucs_ulong8((ulong8 *) mp, *((ulong8 *) msgp)); // could be OOO
+  // is this fence actually needed?
+  sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::system);
+}
+#endif
 
 void GPURing::Print(const char *name)
 {
@@ -159,15 +183,12 @@ void GPURing::Print(const char *name)
   Ring::Print();
   std::cout << "  next send " << next_send << std::endl;
   for (int i = 0; i < GroupN; i += 1) {
-    std::cout << "  credit_groups[" << i << "] = " << credit_groups[i] << std::endl;
-
+    std::cout << "  groups[" << i << "].credit = " << groups[i].credit << std::endl;
   }
   std::cout << "  next_track " << next_track << std::endl;
   for (int i = 0; i < TrackN; i += 1) {
     std::cout << "  track[" << i << "].next_receive = " << track[i].next_receive << std::endl;
-
   }
-  
 }
 
 //==============  CPU version

@@ -4,11 +4,11 @@
 
 #define TRACE 0
 
-constexpr int RingN = 2048;
+constexpr int RingN = 8192;
 constexpr int GroupN = 8;
-constexpr int MsgsPerGroup = RingN / GroupN;  // 128
-constexpr int TrackN = 32;
-constexpr int GroupMsgPerTrack = MsgsPerGroup / TrackN; //16
+constexpr int MsgsPerGroup = RingN / GroupN;
+constexpr int TrackN = 64;
+constexpr int GroupMsgPerTrack = MsgsPerGroup / TrackN;
 
 int groupof(int sequence)
 {
@@ -142,13 +142,22 @@ class Ring {
 
 };
 
-class GPUTrack {
+class GPUTrack { // align!
  public:
   int32_t lock;
   int32_t next_receive;
   int32_t pad[6];
   sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_lock;
-  GPUTrack() : atomic_lock(lock) { }
+  sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_next_receive;
+  
+ GPUTrack() : atomic_next_receive(next_receive), atomic_lock(lock) { }
+};
+
+class GPUGroup {
+ public:
+  int32_t credit;
+  sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_credit;
+ GPUGroup() : atomic_credit(credit) { credit = 0; }
 };
 
 
@@ -157,7 +166,7 @@ class GPURing : public Ring {
  public:
   int32_t receive_count;
   int32_t next_send;        // next slot in sendbuf
-  int32_t credit_groups[GroupN]; // atomic, set up at point of use
+  GPUGroup groups[GroupN];  // atomic
   int32_t next_track;
   GPUTrack track[TrackN];
   // ordering may be excessive
@@ -171,7 +180,8 @@ class GPURing : public Ring {
   GPURing(struct RingMessage *sendbuf, struct RingMessage *recvbuf);
     
   void Print(const char *name);  // memory may not be addressible
-  void Send(struct RingMessage *msg);
+  void Send(struct RingMessage *msgp, int count);
+  void Send(struct RingMessage *msgp);
   int Poll();
   void Discard(int32_t seq);
   void Drain();  // call poll until there are no messages immediately available
