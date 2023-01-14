@@ -770,12 +770,12 @@ int main(int argc, char *argv[]) {
   double nsec = elapsed / fcount;
   std::cout << "elapsed " << elapsed << " fcount " << fcount << std::endl;
   std::cout << argv[0];
-  std::cout << " --a2b_count=" << loc_a2b_count;
-  std::cout << " --b2a_count=" << loc_b2a_count;
-  std::cout << " --a2b_buf=" << code_to_location(loc_a2b_buf);
-  std::cout << " --b2a_buf=" << code_to_location(loc_b2a_buf);
   std::cout << " --a=" << code_to_location(loc_a);
   std::cout << " --b=" << code_to_location(loc_b);
+  std::cout << " --a2bbuf=" << code_to_location(loc_a2b_buf);
+  std::cout << " --b2abuf=" << code_to_location(loc_b2a_buf);
+  std::cout << " --a2bcount=" << loc_a2b_count;
+  std::cout << " --b2acount=" << loc_b2a_count;
   std::cout << " --athreads=" << loc_athreads;
   std::cout << " --bthreads=" << loc_bthreads;
   if (loc_latency) std::cout << " --latency";
@@ -783,7 +783,7 @@ int main(int argc, char *argv[]) {
   if (loc_b2a_count <= 2000) {
     int err = 0;
     for (int i = 0; i < loc_b2a_count; i += 1) {
-      int32_t v = gpua_rx_mem_hostmap[i%RingN].sequence;
+      unsigned v = gpua_rx_mem_hostmap[i%RingN].sequence;
       if (v != (i + RingN) ) {
 	err += 1;
 	printf("gpua_rx_mem[%d] == %d expected %d seq %i\n", i, v, i, gpub_rx_mem_hostmap[i%RingN].sequence);
@@ -794,7 +794,7 @@ int main(int argc, char *argv[]) {
   if (loc_a2b_count <= 2000) {
     int err = 0;
     for (int i = 0; i < loc_a2b_count; i += 1) {
-      int32_t v = gpub_rx_mem_hostmap[i%RingN].sequence;
+      unsigned v = gpub_rx_mem_hostmap[i%RingN].sequence;
       if (v != (i + RingN)) {
 	err += 1;
 	printf("gpub_rx_mem[%d] == %d expected %d seq %d\n", i, v, i, gpub_rx_mem_hostmap[i%RingN].sequence);

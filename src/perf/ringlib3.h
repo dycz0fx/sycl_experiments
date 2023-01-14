@@ -4,18 +4,18 @@
 
 #define TRACE 0
 
-constexpr int RingN = 8192;
-constexpr int GroupN = 8;
-constexpr int MsgsPerGroup = RingN / GroupN;
-constexpr int TrackN = 64;
-constexpr int GroupMsgPerTrack = MsgsPerGroup / TrackN;
+constexpr unsigned RingN = 1024;
+constexpr unsigned GroupN = 8;
+constexpr unsigned MsgsPerGroup = RingN / GroupN; //128
+constexpr unsigned TrackN = 8;
+constexpr unsigned GroupMsgPerTrack = MsgsPerGroup / TrackN;  // 16
 
-int groupof(int sequence)
+int groupof(unsigned sequence)
 {
   return ((sequence / MsgsPerGroup) % GroupN);
 }
 
-int roundup(int sequence)
+unsigned roundup(unsigned sequence)
 {
   return ((sequence + MsgsPerGroup) & (~(MsgsPerGroup - 1)));
 }
@@ -29,8 +29,8 @@ int roundup(int sequence)
 
 /* should the length be implicit or explicit? */
 struct RingMessage {
-  int32_t sequence;
-  int32_t header;
+  unsigned sequence;
+  int header;
   uint64_t data[7];
 };
 
@@ -123,7 +123,7 @@ union RingMessages {
 #define LOAD_PEER_NEXT_RECV() (recvbuf[RingN].sequence)
 // loads only
 #define STORE_PEER_NEXT_RECV(x) (sendbuf[RingN].sequence = (x))
-#define GPU_STORE_PEER_NEXT_RECV(x) (ucs_uint((uint *) &sendbuf[RingN].sequence, (uint) x))
+#define GPU_STORE_PEER_NEXT_RECV(x) (ucs_uint((unsigned *) &sendbuf[RingN].sequence, (unsigned) x))
 
 
 /* each end of the link has a Ring record 
@@ -134,9 +134,8 @@ class Ring {
   struct RingMessage *sendbuf;   // remote buffer
   struct RingMessage *recvbuf;   // local buffer
   // accounting and debug from here down
-  int32_t wait_in_send;
-  int32_t wait_in_drain;
-  int64_t send_wait_count;
+  int wait_in_send;
+  int wait_in_drain;
   // functions
   void Print();
 
@@ -144,19 +143,19 @@ class Ring {
 
 class GPUTrack { // align!
  public:
-  int32_t lock;
-  int32_t next_receive;
-  int32_t pad[6];
-  sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_lock;
-  sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_next_receive;
+  int lock;
+  int next_receive;
+  int pad[14];
+  sycl::atomic_ref<int, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_lock;
+  sycl::atomic_ref<int, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_next_receive;
   
  GPUTrack() : atomic_next_receive(next_receive), atomic_lock(lock) { }
 };
 
 class GPUGroup {
  public:
-  int32_t credit;
-  sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_credit;
+  int credit;
+  sycl::atomic_ref<int, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_credit;
  GPUGroup() : atomic_credit(credit) { credit = 0; }
 };
 
@@ -164,17 +163,17 @@ class GPUGroup {
 // GPU uses sycl::atomic_ref rather than std::atomic
 class GPURing : public Ring {
  public:
-  int32_t receive_count;
-  int32_t next_send;        // next slot in sendbuf
+  int receive_count;
+  int next_send;        // next slot in sendbuf
   GPUGroup groups[GroupN];  // atomic
-  int32_t next_track;
+  int next_track;
   GPUTrack track[TrackN];
   // ordering may be excessive
-  sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_receive_count;
+  sycl::atomic_ref<int, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_receive_count;
   
-  sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_next_send;
+  sycl::atomic_ref<int, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_next_send;
   
-  sycl::atomic_ref<int32_t, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_next_track;
+  sycl::atomic_ref<int, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_next_track;
   
   // must be called on the GPU!
   GPURing(struct RingMessage *sendbuf, struct RingMessage *recvbuf);
@@ -183,7 +182,7 @@ class GPURing : public Ring {
   void Send(struct RingMessage *msgp, int count);
   void Send(struct RingMessage *msgp);
   int Poll();
-  void Discard(int32_t seq);
+  void Discard(unsigned seq);
   void Drain();  // call poll until there are no messages immediately available
  private:
   void ProcessMessage(struct RingMessage *msg);
@@ -191,15 +190,15 @@ class GPURing : public Ring {
 
 class CPURing : public Ring {
  public:
-  int32_t next_receive;     // next slot in recvbuf
-  std::atomic<int32_t> atomic_next_send;
-  std::atomic<int32_t> atomic_receive_lock;
+  int next_receive;     // next slot in recvbuf
+  std::atomic<int> atomic_next_send;
+  std::atomic<int> atomic_receive_lock;
   void InitState(struct RingMessage *sendbuf, struct RingMessage *recvbuf);
 
   void Print(const char *name);
   void Send(struct RingMessage *msg);
   int Poll();
-  void Discard(int32_t seq);
+  void Discard(unsigned seq);
   void Drain();
  private:
   void ProcessMessage(struct RingMessage *msg);

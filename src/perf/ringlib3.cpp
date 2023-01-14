@@ -22,9 +22,6 @@ void Ring::Print()
   std::cout << "  send buf " << sendbuf << std::endl;
   std::cout << "  recv buf " << recvbuf << std::endl;
   //std::cout << "  peer next receive " << peer_next_receive << std::endl;
-  std::cout << "  wait_in_send " << wait_in_send << std::endl;
-  std::cout << "  wait_in_drain " << wait_in_drain << std::endl;
-  std::cout << "  send_wait_count " << send_wait_count << std::endl;
 }
 
 
@@ -42,11 +39,6 @@ GPURing::GPURing(struct RingMessage *sendbuf, struct RingMessage *recvbuf) : ato
     this->track[i].next_receive = RingN + i;  // in place of next_receive
   }
   GPU_STORE_PEER_NEXT_RECV(RingN);
-#if TRACE == 1
-  this->wait_in_send = 0;
-  this->wait_in_drain = 0;
-#endif
-
 }
 
 void GPURing::ProcessMessage(struct RingMessage *msg)
@@ -59,17 +51,11 @@ void GPURing::ProcessMessage(struct RingMessage *msg)
 
 void GPURing::Drain()
 {
-  #if TRACE == 1
-  wait_in_drain = 5;
-  #endif
   while (Poll());
-  #if TRACE == 1
-  wait_in_drain = 0;
-  #endif
 }
 
 /* does minimal work by waiting for and discarding messages up to seq */
-void GPURing::Discard(int32_t seq)
+void GPURing::Discard(unsigned seq)
 {
 
 }
@@ -85,11 +71,11 @@ void GPURing::Discard(int32_t seq)
 int GPURing::Poll()
 {
   int res = 0;
-  int32_t my_track = atomic_next_track.fetch_add(1) % TrackN;
+  unsigned my_track = atomic_next_track.fetch_add(1) % TrackN;
 
-  int32_t lockwasbusy = track[my_track].atomic_lock.exchange(1); // try track lock
+  unsigned lockwasbusy = track[my_track].atomic_lock.exchange(1); // try track lock
   if (lockwasbusy == 0) {
-    int32_t my_slot = track[my_track].atomic_next_receive.load();
+    unsigned my_slot = track[my_track].atomic_next_receive.load();
     struct RingMessage *msgp = &recvbuf[my_slot % RingN]; // msg ptr
     union RingMessages rm;
     sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
@@ -98,10 +84,10 @@ int GPURing::Poll()
       ProcessMessage(&rm.msg);
       res = 1;
       track[my_track].atomic_next_receive += TrackN;   // may be picked up by another thread next
-      int32_t my_group = groupof(my_slot);
+      unsigned my_group = groupof(my_slot);
       /* note reduce contention on atomic_credit_group by first acccumulating
 	 in the track counter */
-      int32_t my_next_receive = roundup(my_slot);
+      unsigned my_next_receive = roundup(my_slot);
       for (;;) {
 	if (groups[my_group].atomic_credit.fetch_add(1) == MsgsPerGroup) {
 	  groups[my_group].atomic_credit.fetch_add(-(MsgsPerGroup+1));
@@ -126,7 +112,7 @@ int GPURing::Poll()
 // count must be less than RingN!  Should we check?
 void GPURing::Send(struct RingMessage *msgp, int count)
 {
-  int32_t my_send_index = atomic_next_send.fetch_add(count);   // allocate slots
+  unsigned my_send_index = atomic_next_send.fetch_add(count);   // allocate slots
   // wait for previous uses of the buffer to be complete
   while (((my_send_index+count) - LOAD_PEER_NEXT_RECV()) > RingN) {
     sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
@@ -146,7 +132,7 @@ void GPURing::Send(struct RingMessage *msgp, int count)
 
 void GPURing::Send(RingMessage *msgp)
 {
-  int32_t my_send_index = atomic_next_send.fetch_add(1);   // allocate slot
+  unsigned my_send_index = atomic_next_send.fetch_add(1);   // allocate slot
   struct RingMessage *mp = &(sendbuf[my_send_index % RingN]);  // ring ptr
   union RingMessages rm;
   rm.msg = *msgp;
@@ -163,7 +149,7 @@ void GPURing::Send(RingMessage *msgp)
 #if 0
 void GPURing::Send(RingMessage *msgp)
 {
-  int32_t my_send_index = atomic_next_send.fetch_add(1);   // allocate slot
+  unsigned my_send_index = atomic_next_send.fetch_add(1);   // allocate slot
   struct RingMessage *mp = &(sendbuf[my_send_index % RingN]);  // ring ptr
   msgp->sequence = my_send_index;
   // wait for previous uses of the buffer to be complete
@@ -214,11 +200,11 @@ void CPURing::InitState(struct RingMessage *sendbuf, struct RingMessage *recvbuf
 
 int CPURing::Poll()
 {
-  int32_t lockwasbusy = atomic_receive_lock.exchange(1);
+  unsigned lockwasbusy = atomic_receive_lock.exchange(1);
   int res = 0;
   if (lockwasbusy == 0) {
   struct RingMessage *msg = &recvbuf[next_receive % RingN]; // msg ptr
-    int32_t sequence = msg->sequence;
+    unsigned sequence = msg->sequence;
     if (sequence == next_receive) {
       ProcessMessage(msg);
       res = 1;
@@ -241,19 +227,13 @@ int CPURing::Poll()
  */
 void CPURing::Send(RingMessage *msg)
 {
-  int32_t my_send_index = atomic_next_send.fetch_add(1);
+  unsigned my_send_index = atomic_next_send.fetch_add(1);
   msg->sequence = my_send_index;
   struct RingMessage *mp = &(sendbuf[my_send_index % RingN]);
-  #if TRACE == 1
-  wait_in_send = 117;
-  #endif
   while ((my_send_index - LOAD_PEER_NEXT_RECV()) > (RingN - 10)) {
     //send_wait_count += 1;
     cpu_relax();
   }
-  #if TRACE == 1
-  wait_in_send = 0;
-  #endif
   _movdir64b(mp, msg); //memcpy(mp, msg, sizeof(RingMessage));
 }
 
@@ -266,19 +246,13 @@ void CPURing::ProcessMessage(struct RingMessage *msg)
 
 void CPURing::Drain()
 {
-  #if TRACE == 1
-  wait_in_drain = 5;
-  #endif
   while (Poll());
-  #if TRACE == 1
-  wait_in_drain = 0;
-  #endif
 }
 
 /* does minimal work by waiting for and discarding messages up to seq */
-void CPURing::Discard(int32_t seq)
+void CPURing::Discard(unsigned seq)
 {
-  int32_t current = next_receive;
+  unsigned current = next_receive;
   union RingMessages rm;
   struct RingMessage *mp;
   do {
