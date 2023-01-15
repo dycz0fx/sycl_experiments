@@ -172,6 +172,7 @@ void GPURing::Send(RingMessage *msgp)
   // wait for previous uses of the buffer to be complete
   while ((my_send_index - LOAD_PEER_NEXT_RECV()) > RingN) {
     sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
+    Poll(1);
   }
   ucs_ulong8((ulong8 *) mp, rm.data); // could be OOO
   // is this fence actually needed?
