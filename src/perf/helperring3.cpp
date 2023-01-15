@@ -54,6 +54,7 @@ void dbprintf(int line, const char *format, ...)
 #define CMD_BTHREADS 1027
 #define CMD_DISCARD 1028
 #define CMD_VERBOSE 1029
+#define CMD_NMSG 2030
 
 /* option global variables */
 // specify defaults
@@ -71,7 +72,7 @@ int glob_b2a_buf = 0;  /* 0: cpu 1: p0 2: p1 3: t0 4: t1 */
 int glob_a = 0;   /* 0: cpu 1: p0 2: p1 3: t0 4: t1 */
 int glob_b = 0;   /* 0: cpu 1: p0 2: p1 3: t0 4: t1 */
 int glob_verbose = 0;
-
+int glob_nmsg = 1;
 void Usage()
 {
   std::cout <<
@@ -87,7 +88,8 @@ void Usage()
     "--validate              set and check data\n"
     "--latency               wait for responses\n"
     "--discard               discard receive traffic\n"
-    "--verbose               more printing\n";
+    "--verbose               more printing\n"
+    "--nmsg=<n>              Poll dwell tries\n";
   std::cout << std::endl;
   exit(1);
 }
@@ -136,6 +138,7 @@ void ProcessArgs(int argc, char **argv)
     {"latency", no_argument, nullptr, CMD_LATENCY},
     {"discard", no_argument, nullptr, CMD_DISCARD},
     {"verbose", no_argument, nullptr, CMD_VERBOSE},
+    {"nmsg", required_argument, nullptr, CMD_NMSG},
     {nullptr, no_argument, nullptr, 0}
   };
   while (true)
@@ -206,6 +209,11 @@ void ProcessArgs(int argc, char **argv)
 	  glob_verbose = 1;
 	  break;
 	}
+	case CMD_NMSG: {
+	  glob_nmsg = std::stoi(optarg);
+	  //std::cout << "--nmsg=" << glob_nmsg << std::endl;
+	  break;
+	}
 	default: {
 	  Usage();
 	  exit(1);
@@ -232,7 +240,7 @@ struct CPURingCommand {
   int discard_flag;
 };
   
-constexpr size_t BUFSIZE = (1L << 20);  //allocate 1 MB usable
+constexpr size_t BUFSIZE = (1L << 24);  //allocate 1 MB usable
 
 void CPUThread(CPURingCommand *r)
 {  // cpu code
@@ -313,9 +321,9 @@ T *get_mmap_address(T * device_ptr, size_t size, sycl::queue Q) {
 
 int main(int argc, char *argv[]) {
   usleep(5000 * omp_get_thread_num()); // do this to avoid race condition while printing
-  std::cout << "Number of available threads: " << omp_get_num_threads() << std::endl;
+  //std::cout << "Number of available threads: " << omp_get_num_threads() << std::endl;
   // each thread can also get its own number
-  std::cout << "Current thread number: " << omp_get_thread_num() << std::endl;
+  //std::cout << "Current thread number: " << omp_get_thread_num() << std::endl;
   ProcessArgs(argc, argv);
   uint64_t loc_a2b_count = glob_a2b_count;
   uint64_t loc_b2a_count = glob_b2a_count;
@@ -328,7 +336,7 @@ int main(int argc, char *argv[]) {
   int loc_discard = glob_discard;
   int loc_a = glob_a;
   int loc_b = glob_b;
-
+  int loc_nmsg = glob_nmsg;
   sycl::property_list prop_list{sycl::property::queue::enable_profiling()};
   std::vector<sycl::queue> qs;
 
@@ -378,30 +386,51 @@ int main(int argc, char *argv[]) {
   // xxxxxxxxxxxxx
 
 
-  sycl::queue qa;
-  sycl::queue qb;
+  sycl::queue qa1;
+  sycl::queue qb1;
   //  assert(loc_a != loc_b);
-  if (loc_a == LOC_CPU) qa = hostq;
-  else if (loc_a == LOC_PVC0) qa = pvcq[0];
-  else if (loc_a == LOC_PVC1) qa = pvcq[1];
-  else if (loc_a == LOC_TILE0) qa = tileq[0];
-  else if (loc_a == LOC_TILE1) qa = tileq[1];
+  if (loc_a == LOC_CPU) qa1 = hostq;
+  else if (loc_a == LOC_PVC0) qa1 = pvcq[0];
+  else if (loc_a == LOC_PVC1) qa1 = pvcq[1];
+  else if (loc_a == LOC_TILE0) qa1 = tileq[0];
+  else if (loc_a == LOC_TILE1) qa1 = tileq[1];
   else assert(0);
-  if (loc_b == LOC_CPU) qb = hostq;
-  else if (loc_b == LOC_PVC0) qb = pvcq[0];
-  else if (loc_b == LOC_PVC1) qb = pvcq[1];
-  else if (loc_b == LOC_TILE0) qb = tileq[0];
-  else if (loc_b == LOC_TILE1) qb = tileq[1];
+  if (loc_b == LOC_CPU) qb1 = hostq;
+  else if (loc_b == LOC_PVC0) qb1 = pvcq[0];
+  else if (loc_b == LOC_PVC1) qb1 = pvcq[1];
+  else if (loc_b == LOC_TILE0) qb1 = tileq[0];
+  else if (loc_b == LOC_TILE1) qb1 = tileq[1];
   else assert(0);
 
+  sycl::queue qa2;
+  sycl::queue qb2;
+  //  assert(loc_a != loc_b);
+  if (loc_a == LOC_CPU) qa2 = hostq;
+  else if (loc_a == LOC_PVC0) qa2 = pvcq[0];
+  else if (loc_a == LOC_PVC1) qa2 = pvcq[1];
+  else if (loc_a == LOC_TILE0) qa2 = tileq[0];
+  else if (loc_a == LOC_TILE1) qa2 = tileq[1];
+  else assert(0);
+  if (loc_b == LOC_CPU) qb2 = hostq;
+  else if (loc_b == LOC_PVC0) qb2 = pvcq[0];
+  else if (loc_b == LOC_PVC1) qb2 = pvcq[1];
+  else if (loc_b == LOC_TILE0) qb2 = tileq[0];
+  else if (loc_b == LOC_TILE1) qb2 = tileq[1];
+  else assert(0);
+
+
   
-  //std::cout<<"qa selected device : "<<qa.get_device().get_info<sycl::info::device::name>() << std::endl;
-  //std::cout<<"qa device vendor : "<<qa.get_device().get_info<sycl::info::device::vendor>() << std::endl;
-  //std::cout<<"qb selected device : "<<qb.get_device().get_info<sycl::info::device::name>() << std::endl;
-  //std::cout<<"qb device vendor : "<<qb.get_device().get_info<sycl::info::device::vendor>() << std::endl;
-  //if (qa.get_device() == qb.get_device()) {
-  //std::cout << "qa and qb are the same device\n" << std::endl;
+  //std::cout<<"qa1 selected device : "<<qa1.get_device().get_info<sycl::info::device::name>() << std::endl;
+  //std::cout<<"qa1 device vendor : "<<qa1.get_device().get_info<sycl::info::device::vendor>() << std::endl;
+  //std::cout<<"qb1 selected device : "<<qb1.get_device().get_info<sycl::info::device::name>() << std::endl;
+  //std::cout<<"qb1 device vendor : "<<qb1.get_device().get_info<sycl::info::device::vendor>() << std::endl;
+  //if (qa1.get_device() == qb1.get_device()) {
+  //std::cout << "qa1 and qb1 are the same device\n" << std::endl;
   //}
+  //std::cout<<"qa2 selected device : "<<qa2.get_device().get_info<sycl::info::device::name>() << std::endl;
+  //std::cout<<"qa2 device vendor : "<<qa2.get_device().get_info<sycl::info::device::vendor>() << std::endl;
+  //std::cout<<"qb2 selected device : "<<qb2.get_device().get_info<sycl::info::device::name>() << std::endl;
+  //std::cout<<"qb2 device vendor : "<<qb2.get_device().get_info<sycl::info::device::vendor>() << std::endl;
 
 
   struct RingMessage *cpu_a2b_mem = (struct RingMessage *) sycl::aligned_alloc_host(4096, BUFSIZE * 2, hostq);
@@ -542,20 +571,20 @@ int main(int argc, char *argv[]) {
   CPURing *cpu_host_b;
 
   if (loc_a == LOC_CPU) {
-    cpua = new (sycl::aligned_alloc_host<CPURing>(4096, 1, qa)) CPURing(); 
+    cpua = new (sycl::aligned_alloc_host<CPURing>(4096, 1, qa1)) CPURing(); 
     cpu_host_a = cpua;
-    std::cout << " cpua " << &cpua << std::endl;
+    //std::cout << " cpua " << &cpua << std::endl;
   } else {
-    ringspacea = sycl::aligned_alloc_device(4096, 4096, qa);
-    ringspacea_host_map = (GPURing *) get_mmap_address(ringspacea, 4096, qa);
+    ringspacea = sycl::aligned_alloc_device(4096, 4096, qa1);
+    ringspacea_host_map = (GPURing *) get_mmap_address(ringspacea, 4096, qa1);
   }
   if (loc_b == LOC_CPU) {
-    cpub = new (sycl::aligned_alloc_host<CPURing>(4096, 1, qb)) CPURing();
+    cpub = new (sycl::aligned_alloc_host<CPURing>(4096, 1, qb1)) CPURing();
     cpu_host_b = cpub;
-    std::cout << " cpub " << &cpub << std::endl;
+    //std::cout << " cpub " << &cpub << std::endl;
   } else {
-    ringspaceb = sycl::aligned_alloc_device(4096, 4096, qb);
-    ringspaceb_host_map = (GPURing *) get_mmap_address(ringspaceb, 4096, qb);
+    ringspaceb = sycl::aligned_alloc_device(4096, 4096, qb1);
+    ringspaceb_host_map = (GPURing *) get_mmap_address(ringspaceb, 4096, qb1);
   }
 
 
@@ -567,20 +596,20 @@ int main(int argc, char *argv[]) {
   struct timespec ts_start, ts_end;
   
 
-  sycl::event ea;
-  sycl::event eb;
+  sycl::event ea1;
+  sycl::event eb1;
 
   if (loc_a == LOC_CPU) {
     memset(gpua_tx_mem, 101, 4096);
   } else {
-    qa.memset(gpua_tx_mem, 101, 4096);
-    qa.wait_and_throw();
+    qa1.memset(gpua_tx_mem, 101, 4096);
+    qa1.wait_and_throw();
   }
   if (loc_b == LOC_CPU) {
     memset(gpub_tx_mem, 102, 4096);
   } else {
-    qb.memset(gpub_tx_mem, 102, 4096);
-    qb.wait_and_throw();
+    qb1.memset(gpub_tx_mem, 102, 4096);
+    qb1.wait_and_throw();
   }
   // check
   for (int i = 0; i < 20; i += 1) {
@@ -599,7 +628,7 @@ int main(int argc, char *argv[]) {
       assert(gpua_tx_mem[i].header == 0);
     }
   } else  {
-    auto e = qa.single_task( [=]() {
+    auto e = qa1.single_task( [=]() {
 	memset(gpua_tx_mem, 0, BUFSIZE);
       });
     e.wait_and_throw();
@@ -614,7 +643,7 @@ int main(int argc, char *argv[]) {
       assert(gpub_tx_mem[i].header == 0);
     }
   } else {
-    auto e = qb.single_task( [=]() {
+    auto e = qb1.single_task( [=]() {
 	memset(gpub_tx_mem, 0, BUFSIZE);
       });
     e.wait_and_throw();
@@ -646,15 +675,15 @@ int main(int argc, char *argv[]) {
   }
   
   
-  pthread_t athread;
-  pthread_t bthread;
+  pthread_t a1thread;
+  pthread_t b1thread;
   pthread_attr_t pt_attributes;
   pthread_attr_init(&pt_attributes);
-  struct JoinStruct ajoin, bjoin;
-  int acompletion = 0;
-  int bcompletion = 0;
-  ajoin.completion = &acompletion;
-  bjoin.completion = &bcompletion;
+  struct JoinStruct a1join, b1join;
+  int a1completion = 0;
+  int b1completion = 0;
+  a1join.completion = &a1completion;
+  b1join.completion = &b1completion;
   struct CPURingCommand acmd;
   acmd.cpur = cpu_host_a;
   acmd.send_count = loc_a2b_count;
@@ -672,14 +701,14 @@ int main(int argc, char *argv[]) {
   start_time = rdtsc();
   
   if (loc_a == LOC_CPU) {
-    pthread_create(&athread, &pt_attributes, ThreadFn, (void *) &acmd);
-    ajoin.is_pthread = 1;
-    ajoin.thread = athread;
+    pthread_create(&a1thread, &pt_attributes, ThreadFn, (void *) &acmd);
+    a1join.is_pthread = 1;
+    a1join.thread = a1thread;
   } else {
     int send_count = loc_a2b_count;
     int recv_count = loc_b2a_count;
     //std::cout << "GPUA send_count " << send_count << " recv_count " << recv_count << std::endl;
-    ea = qa.submit([&](sycl::handler &h) {
+    ea1 = qa1.submit([&](sycl::handler &h) {
 	//auto out = sycl::stream(1024, 768, h);
 	h.parallel_for_work_group(sycl::range(1), sycl::range(loc_athreads), [=](sycl::group<1> grp) {
 	    GPURing *gpua = new(ringspacea) GPURing(gpua_tx_mem, gpua_rx_mem);
@@ -694,24 +723,24 @@ int main(int argc, char *argv[]) {
 		    gpua->Send(&msg);
 		    si += loc_athreads;
 		  }
-		  if (gpua->receive_count < recv_count) gpua->Poll();
+		  while ((gpua->receive_count < recv_count) && gpua->Poll(loc_nmsg));
 		}
-		while (gpua->receive_count < recv_count) gpua->Poll();
+		while (gpua->receive_count < recv_count) gpua->Poll(loc_nmsg);
 	      });
 	  });
       });
-    ajoin.is_pthread = 0;
-    ajoin.e = ea;
+    a1join.is_pthread = 0;
+    a1join.e = ea1;
   }
   if (loc_b == LOC_CPU) {
-    pthread_create(&bthread, &pt_attributes, ThreadFn, (void *) &bcmd);
-    bjoin.is_pthread = 1;
-    bjoin.thread = bthread;
+    pthread_create(&b1thread, &pt_attributes, ThreadFn, (void *) &bcmd);
+    b1join.is_pthread = 1;
+    b1join.thread = b1thread;
   } else {
     int send_count = loc_b2a_count;
     int recv_count = loc_a2b_count;
     //std::cout << "GPUB send_count " << send_count << " recv_count " << recv_count << std::endl;
-    eb = qb.submit([&](sycl::handler &h) {
+    eb1 = qb1.submit([&](sycl::handler &h) {
 	//auto out = sycl::stream(1024, 768, h);
 	h.parallel_for_work_group(sycl::range(1), sycl::range(loc_bthreads), [=](sycl::group<1> grp) {
 	    GPURing *gpub = new(ringspaceb) GPURing(gpub_tx_mem, gpub_rx_mem);
@@ -726,37 +755,37 @@ int main(int argc, char *argv[]) {
 		    gpub->Send(&msg);
 		    si += loc_bthreads;
 		  }
-		  if (gpub->receive_count < recv_count) gpub->Poll();
+		  while ((gpub->receive_count < recv_count) && gpub->Poll(loc_nmsg));
 		}
-		while (gpub->receive_count < recv_count) gpub->Poll();
+		while (gpub->receive_count < recv_count) gpub->Poll(loc_nmsg);
 	      });
 	  });
       });
-    bjoin.is_pthread = 0;
-    bjoin.e = eb;
+    b1join.is_pthread = 0;
+    b1join.e = eb1;
   }
-  pthread_t ajoiner, bjoiner;
-  pthread_create(&ajoiner, &pt_attributes, Joiner, &ajoin);
-  pthread_create(&bjoiner, &pt_attributes, Joiner, &bjoin);
+  pthread_t a1joiner, b1joiner;
+  pthread_create(&a1joiner, &pt_attributes, Joiner, &a1join);
+  pthread_create(&b1joiner, &pt_attributes, Joiner, &b1join);
 
   //std::cout << "starting timeout check" << std::endl;
   for (;;) {
     clock_gettime(CLOCK_REALTIME, &ts_end);
     end_time = rdtsc();
-    if (acompletion && bcompletion) break;
-    if (ts_end.tv_sec - ts_start.tv_sec > 8) {
-      printf("TIMEOUT acomplete %d bcomplete %d\n", acompletion, bcompletion);
+    if (a1completion && b1completion) break;
+    if (ts_end.tv_sec - ts_start.tv_sec > 16) {
+      printf("TIMEOUT a1complete %d b1complete %d\n", a1completion, b1completion);
       fflush(stdout);
       break;
     }
   }
   //std::cout << "got completion flags" << std::endl;
-  if (acompletion) pthread_join(ajoiner, NULL);
-  if (bcompletion) pthread_join(bjoiner, NULL);
+  if (a1completion) pthread_join(a1joiner, NULL);
+  if (b1completion) pthread_join(b1joiner, NULL);
   //std::cout << "joined complete joiners" << std::endl;
-  if ((loc_a != LOC_CPU) && acompletion) printduration("gpua kernel ", ea);
-  if ((loc_b != LOC_CPU) && bcompletion) printduration("gpub kernel ", eb);
-  std::cout << "printduration" << std::endl;
+  if ((loc_a != LOC_CPU) && a1completion) printduration("gpua1 kernel ", ea1);
+  if ((loc_b != LOC_CPU) && b1completion) printduration("gpub1 kernel ", eb1);
+  //std::cout << "printduration" << std::endl;
 
   /* common cleanup */
   double elapsed = ((double) (ts_end.tv_sec - ts_start.tv_sec)) * 1000000000.0 +
@@ -778,6 +807,7 @@ int main(int argc, char *argv[]) {
   std::cout << " --b2acount=" << loc_b2a_count;
   std::cout << " --athreads=" << loc_athreads;
   std::cout << " --bthreads=" << loc_bthreads;
+  std::cout << " --nmsg=" << loc_nmsg;
   if (loc_latency) std::cout << " --latency";
   std::cout << " nsec=" << nsec << std::endl;
   if (loc_b2a_count <= 2000) {
@@ -803,17 +833,29 @@ int main(int argc, char *argv[]) {
     printf("gpub_rx_mem errors %d\n", err);
   }
   fflush(stdout);
-  if (glob_verbose || (acompletion == 0) || (bcompletion == 0)) {
+  if (glob_verbose || (a1completion == 0) || (b1completion == 0)) {
     printf("gpua next_peer_receive %d\n", gpua_rx_mem_hostmap[RingN].sequence);
     printf("gpub next_peer_receive %d\n", gpub_rx_mem_hostmap[RingN].sequence);
+    
+    
     if (loc_a == LOC_CPU) {
       cpua->Print("cpua");
     } else {
+      unsigned low = ringspacea_host_map->receive_count - 20;
+      unsigned high = ringspacea_host_map->receive_count + 20;
+      for (unsigned i = low; i <= high; i += 1) {
+	std::cout << "gpua recvbuf[" << i << "] = " << gpua_rx_mem_hostmap[i%RingN].sequence << std::endl;
+      }
       ringspacea_host_map->Print("gpua");
     }
     if (loc_b == LOC_CPU) {
       cpub->Print("cpub");
     } else {
+      unsigned low = ringspaceb_host_map->receive_count - 20;
+      unsigned high = ringspaceb_host_map->receive_count + 20;
+      for (unsigned i = low; i <= high; i += 1) {
+	std::cout << "gpub recvbuf[" << i << "] = " << gpub_rx_mem_hostmap[i%RingN].sequence << std::endl;
+      }
       ringspaceb_host_map->Print("gpub");
     }
   }

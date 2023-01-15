@@ -4,11 +4,11 @@
 
 #define TRACE 0
 
-constexpr unsigned RingN = 1024;
+constexpr unsigned RingN = 4096;
 constexpr unsigned GroupN = 8;
-constexpr unsigned MsgsPerGroup = RingN / GroupN; //128
-constexpr unsigned TrackN = 8;
-constexpr unsigned GroupMsgPerTrack = MsgsPerGroup / TrackN;  // 16
+constexpr unsigned MsgsPerGroup = RingN / GroupN; 
+constexpr unsigned TrackN = 32;
+constexpr unsigned GroupMsgPerTrack = MsgsPerGroup / TrackN;
 
 int groupof(unsigned sequence)
 {
@@ -133,9 +133,6 @@ class Ring {
  public:
   struct RingMessage *sendbuf;   // remote buffer
   struct RingMessage *recvbuf;   // local buffer
-  // accounting and debug from here down
-  int wait_in_send;
-  int wait_in_drain;
   // functions
   void Print();
 
@@ -147,14 +144,14 @@ class GPUTrack { // align!
   int next_receive;
   int pad[14];
   sycl::atomic_ref<int, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_lock;
-  sycl::atomic_ref<int, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_next_receive;
   
- GPUTrack() : atomic_next_receive(next_receive), atomic_lock(lock) { }
+ GPUTrack() : atomic_lock(lock) { }
 };
 
 class GPUGroup {
  public:
   int credit;
+  int pad[15];
   sycl::atomic_ref<int, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_credit;
  GPUGroup() : atomic_credit(credit) { credit = 0; }
 };
@@ -181,7 +178,7 @@ class GPURing : public Ring {
   void Print(const char *name);  // memory may not be addressible
   void Send(struct RingMessage *msgp, int count);
   void Send(struct RingMessage *msgp);
-  int Poll();
+  int Poll(int nmsg);  // poll nmsg times
   void Discard(unsigned seq);
   void Drain();  // call poll until there are no messages immediately available
  private:
