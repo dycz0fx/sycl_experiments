@@ -561,8 +561,8 @@ int main(int argc, char *argv[]) {
 		       
   CPURing *cpua;
   CPURing *cpub;
-  void * ringspacea;
-  void * ringspaceb;
+  GPURing *ringspacea;
+  GPURing *ringspaceb;
   GPURing *ringspacea_host_map;
   GPURing *ringspaceb_host_map;
 
@@ -575,16 +575,16 @@ int main(int argc, char *argv[]) {
     cpu_host_a = cpua;
     //std::cout << " cpua " << &cpua << std::endl;
   } else {
-    ringspacea = sycl::aligned_alloc_device(4096, 4096, qa1);
-    ringspacea_host_map = (GPURing *) get_mmap_address(ringspacea, 4096, qa1);
+    ringspacea = sycl::aligned_alloc_device<GPURing>(4096, 2, qa1);
+    ringspacea_host_map = (GPURing *) get_mmap_address(ringspacea,  sizeof(GPURing) * 2, qa1);
   }
   if (loc_b == LOC_CPU) {
     cpub = new (sycl::aligned_alloc_host<CPURing>(4096, 1, qb1)) CPURing();
     cpu_host_b = cpub;
     //std::cout << " cpub " << &cpub << std::endl;
   } else {
-    ringspaceb = sycl::aligned_alloc_device(4096, 4096, qb1);
-    ringspaceb_host_map = (GPURing *) get_mmap_address(ringspaceb, 4096, qb1);
+    ringspaceb = sycl::aligned_alloc_device<GPURing>(4096, 2, qb1);
+    ringspaceb_host_map = (GPURing *) get_mmap_address(ringspaceb,  sizeof(GPURing) * 2, qb1);
   }
 
 
@@ -711,18 +711,16 @@ int main(int argc, char *argv[]) {
     ea1 = qa1.submit([&](sycl::handler &h) {
 	//auto out = sycl::stream(1024, 768, h);
 	h.parallel_for_work_group(sycl::range(1), sycl::range(loc_athreads), [=](sycl::group<1> grp) {
-	    GPURing *gpua = new(ringspacea) GPURing(gpua_tx_mem, gpua_rx_mem);
+	    GPURing *gpua = new(ringspacea) GPURing(23, gpua_tx_mem, gpua_rx_mem);
 	    grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
 		struct RingMessage msg;
 		msg.header = MSG_PUT;
 		int si = it.get_global_id()[0];  // send index
 		int ri = it.get_global_id()[0];  // receive index
 		while (si < send_count) {
-		  if (si < send_count) {
-		    msg.data[1] = si;
-		    gpua->Send(&msg);
-		    si += loc_athreads;
-		  }
+		  msg.data[1] = si;
+		  gpua->Send(&msg);
+		  si += loc_athreads;
 		  while ((gpua->receive_count < recv_count) && gpua->Poll(loc_nmsg));
 		}
 		while (gpua->receive_count < recv_count) gpua->Poll(loc_nmsg);
@@ -743,18 +741,16 @@ int main(int argc, char *argv[]) {
     eb1 = qb1.submit([&](sycl::handler &h) {
 	//auto out = sycl::stream(1024, 768, h);
 	h.parallel_for_work_group(sycl::range(1), sycl::range(loc_bthreads), [=](sycl::group<1> grp) {
-	    GPURing *gpub = new(ringspaceb) GPURing(gpub_tx_mem, gpub_rx_mem);
+	    GPURing *gpub = new(ringspaceb) GPURing(24, gpub_tx_mem, gpub_rx_mem);
 	    grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
 		struct RingMessage msg;
 		msg.header = MSG_PUT;
 		int si = it.get_global_id()[0];  // send index
 		int ri = it.get_global_id()[0];  // receive index
 		while (si < send_count) {
-		  if (si < send_count) {
-		    msg.data[1] = si;
-		    gpub->Send(&msg);
-		    si += loc_bthreads;
-		  }
+		  msg.data[1] = si;
+		  gpub->Send(&msg);
+		  si += loc_bthreads;
 		  while ((gpub->receive_count < recv_count) && gpub->Poll(loc_nmsg));
 		}
 		while (gpub->receive_count < recv_count) gpub->Poll(loc_nmsg);

@@ -1,6 +1,8 @@
 #ifndef RINGLIB3_H
 #define RINGLIB3_H
 #import <atomic>
+#import "uncached.cpp"
+#include <immintrin.h>
 
 #define TRACE 0
 
@@ -165,6 +167,7 @@ class GPURing : public Ring {
   GPUGroup groups[GroupN];  // atomic
   int next_track;
   GPUTrack track[TrackN];
+  int ringid;  // for printing
   // ordering may be excessive
   sycl::atomic_ref<int, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_receive_count;
   
@@ -173,7 +176,7 @@ class GPURing : public Ring {
   sycl::atomic_ref<int, sycl::memory_order::seq_cst, sycl::memory_scope::system, sycl::access::address_space::global_space> atomic_next_track;
   
   // must be called on the GPU!
-  GPURing(struct RingMessage *sendbuf, struct RingMessage *recvbuf);
+  GPURing(int id, struct RingMessage *sendbuf, struct RingMessage *recvbuf);
     
   void Print(const char *name);  // memory may not be addressible
   void Send(struct RingMessage *msgp, int count);

@@ -2,7 +2,6 @@
 #define RINGLIB3_CPP
 
 #include "ringlib3.h"
-#include "uncached.cpp"
 
 #define DEBUG 0
 
@@ -27,8 +26,9 @@ void Ring::Print()
 
 //============== GPU Versions
 
-GPURing::GPURing(struct RingMessage *sendbuf, struct RingMessage *recvbuf) : atomic_next_send(next_send), atomic_next_track(next_track), atomic_receive_count(receive_count)
+GPURing::GPURing(int id, struct RingMessage *sendbuf, struct RingMessage *recvbuf) : atomic_next_send(next_send), atomic_next_track(next_track), atomic_receive_count(receive_count)
 {
+  this->ringid = id;
   this->next_send = RingN;
   this->sendbuf = sendbuf;
   this->recvbuf = recvbuf;
@@ -147,7 +147,7 @@ void GPURing::Send(struct RingMessage *msgp, int count)
   // wait for previous uses of the buffer to be complete
   while (((my_send_index+count) - LOAD_PEER_NEXT_RECV()) > RingN) {
     sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
-    Poll(1);
+    //Poll(1); different ring object!
   }
   while (count--) {
     union RingMessages rm;
@@ -172,7 +172,7 @@ void GPURing::Send(RingMessage *msgp)
   // wait for previous uses of the buffer to be complete
   while ((my_send_index - LOAD_PEER_NEXT_RECV()) > RingN) {
     sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
-    Poll(1);
+    // Poll(1); different ring object
   }
   ucs_ulong8((ulong8 *) mp, rm.data); // could be OOO
   // is this fence actually needed?
@@ -198,6 +198,7 @@ void GPURing::Send(RingMessage *msgp)
 void GPURing::Print(const char *name)
 {
   std::cout << "Name " << name << std::endl;
+  std::cout << "  ringid " << ringid << std::endl;
   std::cout << "  receive_count " << receive_count << std::endl;
   Ring::Print();
   std::cout << "  next send " << next_send << std::endl;
@@ -265,6 +266,7 @@ void CPURing::Send(RingMessage *msg)
   struct RingMessage *mp = &(sendbuf[my_send_index % RingN]);
   while ((my_send_index - LOAD_PEER_NEXT_RECV()) > (RingN - 10)) {
     //send_wait_count += 1;
+    //Poll();  // deadlock prevention
     cpu_relax();
   }
   _movdir64b(mp, msg); //memcpy(mp, msg, sizeof(RingMessage));
