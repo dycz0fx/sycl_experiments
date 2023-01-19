@@ -1,6 +1,8 @@
 #define DEBUG 0
-
+#include <stdint.h>
 #include <CL/sycl.hpp>
+#include "uncached.cpp"
+#include "syclutilities.cpp"
 #include <stdlib.h>
 #include <unistd.h>
 #include <thread>
@@ -18,26 +20,11 @@
 #include <assert.h>
 #include <string.h>
 #include <malloc.h>
-#include "uncached.cpp"
 #include "ringlib3.cpp"
+
 #include <omp.h>
 #include <new>   // in order to use placement new
 
-void dbprintf(int line, const char *format, ...)
-{
-  va_list arglist;
-  printf("line %d: ", line);
-  va_start(arglist, format);
-  vprintf(format, arglist);
-  va_end(arglist);
-}
-
-#define DP(...) if (DEBUG) dbprintf(__LINE__, __VA_ARGS__)
-
-#define HERE()
-#define CHERE(name) if (DEBUG) std::cout << name << " " <<  __FUNCTION__ << ": " << __LINE__ << std::endl; 
-
-#define NSEC_IN_SEC 1000000000.0
 /* how many messages per buffer */
 /* option codes */
 #define CMD_A2B_COUNT 1001
@@ -222,15 +209,6 @@ void ProcessArgs(int argc, char **argv)
     }
 }
 
-void printduration(const char* name, sycl::event e)
-  {
-    uint64_t start =
-      e.get_profiling_info<sycl::info::event_profiling::command_start>();
-    uint64_t end =
-      e.get_profiling_info<sycl::info::event_profiling::command_end>();
-    double duration = static_cast<double>(end - start) / NSEC_IN_SEC;
-    std::cout << name << " execution time: " << duration << " sec" << std::endl;
-  }
 
 struct CPURingCommand {
   CPURing *cpur;
@@ -296,28 +274,6 @@ void *Joiner(void *arg)
 }
 
 
-template<typename T>
-T *get_mmap_address(T * device_ptr, size_t size, sycl::queue Q) {
-    sycl::context ctx = Q.get_context();
-    ze_ipc_mem_handle_t ze_ipc_handle;
-    ze_result_t ret = zeMemGetIpcHandle(sycl::get_native<sycl::backend::ext_oneapi_level_zero>(ctx), device_ptr, &ze_ipc_handle);
-    //std::cout<<"zeMemGetIpcHandle return : " << ret << std::endl;
-    assert(ret == ZE_RESULT_SUCCESS);
-    int fd;
-    memcpy(&fd, &ze_ipc_handle, sizeof(fd));
-    //std::cout << " fd " << fd << std::endl;
-    //struct stat statbuf;
-    //fstat(fd, &statbuf);
-    //std::cout << "requested size " << size << std::endl;
-    //std::cout << "fd size " << statbuf.st_size << std::endl;
-    void *base = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (base == (void *) -1) {
-      std::cout << "mmap returned -1" << std::endl;
-      std::cout << strerror(errno) << std::endl;  
-    }
-    assert(base != (void *) -1);
-    return (T*)base;
-}
 
 int main(int argc, char *argv[]) {
   usleep(5000 * omp_get_thread_num()); // do this to avoid race condition while printing
