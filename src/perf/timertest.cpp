@@ -271,6 +271,33 @@ int main(int argc, char *argv[]) {
     printf("csv,hostwritegpu,count,threads,time\n");
     printf("csv,hostwritegpu,%u,%d,%ld\n", count,  omp_get_num_threads() , end_time-start_time);
   }
+  if (strcmp(argv[1], "hostwritehost") == 0) {
+    assert(argc == 3);
+    unsigned count = atol(argv[2]);
+    
+    assert(count < (BUFSIZE/sizeof(uint64_t)));
+    uint64_t start_time = rdtsc();
+    #pragma omp parallel for
+    for (size_t i = 0; i < count; i += 1) {
+      uint64_t v[8];
+      v[0] = rdtsc();
+      v[1] = i;
+      host_buffer[0+(i << 3)] = v[0];
+      host_buffer[0+(i << 3)] = v[1];
+    }
+    uint64_t end_time = rdtsc();
+    sleep(1);
+    //qa1.memcpy(host_buffer, device_buffer, count * sizeof(uint64_t)).wait();
+    //sleep(1);
+    uint64_t last = 0;
+    for (size_t i = 0; i < count; i += 1) {
+      uint64_t v = host_buffer[i<<3];
+      printf("%8ld c %ld diff %ld\n", i, v, v - last);
+      last = v;
+    }
+    printf("csv,hostwritehost,count,threads,time\n");
+    printf("csv,hostwritehost,%u,%d,%ld\n", count,  omp_get_num_threads() , end_time-start_time);
+  }
 
   if (strcmp(argv[1], "pingpong") == 0) {
     assert(argc == 5);
