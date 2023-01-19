@@ -2,6 +2,8 @@
 #ifndef UNCACHED_H
 #define UNCACHED_H
 
+#include <CL/sycl.hpp>
+
 #define USE_BUILTIN 0
 
 // ############################
