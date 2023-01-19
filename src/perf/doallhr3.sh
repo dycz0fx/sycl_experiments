@@ -7,17 +7,17 @@ HITHREADS="32 64 128 256"
 
 
 for runs in 1 2 3 4 5; do
-    srun src/perf/helperring3 --a=c --b=c --a2bbuf=c --b2abuf=c --athreads=1 --bthreads=1 --a2bcount=${LOCOUNT} --b2acount=0
+    srun src/perf/helperring3a --a=c --b=c --a2bbuf=c --b2abuf=c --athreads=1 --bthreads=1 --a2bcount=${LOCOUNT} --b2acount=0
 done
 for runs in 1 2 3 4 5; do
-    srun src/perf/helperring3 --a=c --b=c --a2bbuf=c --b2abuf=c --athreads=1 --bthreads=1 --a2bcount=${LOCOUNT} --b2acount=${LOCOUNT}
+    srun src/perf/helperring3a --a=c --b=c --a2bbuf=c --b2abuf=c --athreads=1 --bthreads=1 --a2bcount=${LOCOUNT} --b2acount=${LOCOUNT}
 done
 
 for bthreads in ${LOTHREADS}; do
-    srun src/perf/helperring3 --a=c --b=p0 --a2bbuf=p0 --b2abuf=c --athreads=1 --bthreads=${bthreads} --a2bcount=${LOCOUNT} --b2acount=0
+    srun src/perf/helperring3a --a=c --b=p0 --a2bbuf=p0 --b2abuf=c --athreads=1 --bthreads=${bthreads} --a2bcount=${LOCOUNT} --b2acount=0
 done
 for bthreads in ${HITHREADS}; do
-    srun src/perf/helperring3 --a=c --b=p0 --a2bbuf=p0 --b2abuf=c --athreads=1 --bthreads=${bthreads} --a2bcount=${HICOUNT} --b2acount=0
+    srun src/perf/helperring3a --a=c --b=p0 --a2bbuf=p0 --b2abuf=c --athreads=1 --bthreads=${bthreads} --a2bcount=${HICOUNT} --b2acount=0
 done
 
 for bthreads in ${LOTHREADS}; do

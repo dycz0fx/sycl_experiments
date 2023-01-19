@@ -1,3 +1,6 @@
+#!/bin/bash
+set -e
+
 for bthreads in 1 2 4 8 16; do
     srun src/perf/helperring3 --a=c --b=p0 --a2bbuf=p0 --b2abuf=c --athreads=1 --bthreads=${bthreads} --a2bcount=500000 --b2acount=0
     srun src/perf/helperring3 --a=c --b=p0 --a2bbuf=p0 --b2abuf=c --athreads=1 --bthreads=${bthreads} --a2bcount=500000 --b2acount=0
