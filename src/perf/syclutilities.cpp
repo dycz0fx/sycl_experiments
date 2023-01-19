@@ -13,6 +13,8 @@
 #include <stdio.h>    // strerror
 #include <string.h>   // memcpy
 
+#include "syclutilities.h"
+
 template<typename T>
 T *get_mmap_address(T * device_ptr, size_t size, sycl::queue Q) {
     sycl::context ctx = Q.get_context();
@@ -47,5 +49,19 @@ void printduration(const char* name, sycl::event e)
     std::cout << name << " execution time: " << duration << " sec" << std::endl;
   }
 
+ulong kernelcycles(sycl::event e)
+{
+  uint64_t start =
+    e.get_profiling_info<sycl::info::event_profiling::command_start>();
+  uint64_t end =
+    e.get_profiling_info<sycl::info::event_profiling::command_end>();
+  return (end - start);
+}
 
+ulong max_frequency(sycl::queue q)
+{
+  sycl::device dev = q.get_device();
+  ulong device_frequency = (uint) dev.get_info<sycl::info::device::max_clock_frequency>();
+  return (device_frequency);
+}
 #endif // ifundef SYCLUTILITIES_CPP
