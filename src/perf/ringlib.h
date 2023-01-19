@@ -1,6 +1,8 @@
 #ifndef RINGLIB_H
 #define RINGLIB_H
 
+#include <stdint.h>
+
 #define TRACE 1
 
 constexpr int RingN = 1024;
