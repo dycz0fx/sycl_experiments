@@ -3,6 +3,8 @@
 #import <atomic>
 #import "uncached.cpp"
 #include <immintrin.h>
+#include <stdint.h>
+#include "ringlib3.h"
 
 #define TRACE 0
 
