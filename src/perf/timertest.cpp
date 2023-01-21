@@ -14,6 +14,8 @@
 #include <stdio.h>
 #include <iostream>
 #include <unistd.h>
+#include <getopt.h>
+
 
 #include "uncached.cpp"
 #include "syclutilities.cpp"
@@ -22,15 +24,169 @@
     
 #include "../common_includes/rdtsc.h"
 
-void writecyclecounter(const char *name, sycl::queue q, uint64_t *buffer, size_t count, int threads)
+
+enum { cmd_count=1, cmd_stride, cmd_threads, cmd_bufloc, cmd_help, cmd_op, cmd_from, cmd_end=-1};
+const char *cmd_str[] =  {"nil", "count", "stride", "threads", "bufloc", "help", "op", "from", 0};
+
+constexpr int buflocN = 5;
+constexpr int fromN = 5;
+enum { loc_c=1, loc_p0, loc_p1, loc_t0, loc_t1, loc_end = -1};
+const char *loc_str[] = {"nil", "c", "p0", "p1", "t0", "t1", 0};
+
+enum { op_load=1, op_store, op_ucs, op_ucl, op_pingpong, op_comparetimer, op_timeread, op_end = -1};
+const char *op_str[] = {"nil", "load", "store", "ucs", "ucl", "pingpong", "comparetimer", "timeread", 0};
+
+int str_to_code(const char **table, const char *s)
+{
+  int code = 0;
+  while (table[code] != 0) {
+    if (strcmp(table[code], s) == 0) return(code);
+    code += 1;
+  }
+  printf ("unknown value %s\n", s);
+  printf ("expecting one of ");
+  code = 0;
+  while (table[code] != 0) {
+    printf(" %s", table[code]);
+    code += 1;
+  }
+  printf("\n");
+  exit(1);
+  return -1;
+}
+
+const char *code_to_str(const char **table, int code)
+{
+  int len = 0;
+  while (table[len]) len += 1;
+  if (code < 0) return ("unknown");
+  if (code >= len) return ("unknown");
+  return(table[code]);
+}
+
+struct Command {
+  const char *name;
+  int has_arg;
+  int *flag;
+  int val;
+  const char **options;
+  const char *help;
+};
+
+struct Command cmdtable[8] {
+  {"count", required_argument, nullptr, cmd_count, nullptr, "how many items"},
+  {"stride", required_argument, nullptr, cmd_stride, nullptr, "stride between items"},
+  {"threads", required_argument, nullptr, cmd_threads, nullptr, "gpu threads"},
+  {"bufloc", required_argument, nullptr, cmd_bufloc, loc_str, "buffer location"},
+  {"op", required_argument, nullptr, cmd_op, op_str, "operation"},
+  {"from", required_argument, nullptr, cmd_from, loc_str, "who runs operation"},
+  {"help", no_argument, nullptr, cmd_help, nullptr, "print this"},
+  {nullptr, no_argument, nullptr, 0, nullptr, nullptr}
+};
+
+struct option long_opts[8];
+    
+
+int g_count = 100;
+int g_threads = 1;
+int g_stride = 1;
+int g_bufloc = loc_c;
+int g_op = op_ucs;
+int g_from = loc_c;
+
+void Usage()
+{
+  int i = 0;
+  while(cmdtable[i].name) {
+    printf("%s ( %s ) ", cmdtable[i].name, cmdtable[i].help);
+    if (cmdtable[i].has_arg == no_argument) printf("no argument");
+    if (cmdtable[i].has_arg == optional_argument) printf("optional argument");
+    if (cmdtable[i].has_arg == required_argument) {
+      if (cmdtable[i].options == nullptr) printf("integer argument");
+      else {
+	printf("options: ");
+	int opt = 0;
+	while (cmdtable[i].options[opt]) {
+	  printf(" %s", cmdtable[i].options[opt]);
+	  opt += 1;
+	}
+      }
+    }
+    printf("\n");
+    i = i + 1;
+  }
+}
+
+void ProcessArgs(int argc, char **argv)
+{
+  option long_opts[8];
+  for (int i = 0; i < 8; i += 1) {
+    long_opts[i].name = cmdtable[i].name;
+    long_opts[i].has_arg = cmdtable[i].has_arg;
+    long_opts[i].flag = cmdtable[i].flag;
+    long_opts[i].val = cmdtable[i].val;
+  };
+  
+  while (true) {
+    const auto opt = getopt_long(argc, argv, "", long_opts, nullptr);
+    if (-1 == opt)
+      break;
+    switch (opt) {
+    case cmd_count: {
+      g_count = std::stoi(optarg);
+      printf("count=%u\n", g_count);
+      break;
+    }
+    case cmd_stride: {
+      g_stride = std::stoi(optarg);
+      printf("stride=%u\n", g_stride);
+      break;
+    }
+    case cmd_threads: {
+      g_threads = std::stoi(optarg);
+      printf("threads=%u\n", g_threads);
+      break;
+    }
+    case cmd_bufloc: {
+      g_bufloc = str_to_code(loc_str, optarg);
+      printf("bufloc=%s\n", loc_str[g_bufloc]);
+      break;
+    }
+    case cmd_from: {
+      g_from = str_to_code(loc_str, optarg);
+      printf("from=%s\n", loc_str[g_from]);
+      break;
+    }
+    case cmd_op: {
+      g_op = str_to_code(op_str, optarg);
+      printf("op=%s\n", op_str[g_op]);
+      break;
+    }
+    case cmd_help: {
+      Usage();
+      exit(0);
+      break;
+    }
+    default: {
+      Usage();
+      exit(1);
+    }
+    }
+  }
+  printf("%s op=%s from=%s bufloc=%s count=%u stride=%u threads=%u\n",
+	 argv[0], op_str[g_op], loc_str[g_from], loc_str[g_bufloc], g_count, g_stride, g_threads);
+}
+
+void writecyclecounter(const char *name, sycl::queue q, uint64_t *buffer, size_t count, unsigned stride, int threads)
 {
   auto e = q.submit([&](sycl::handler &h) {
       h.parallel_for_work_group(sycl::range(1), sycl::range(threads), [=](sycl::group<1> grp) {
 	  grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
-	      int si = it.get_global_id()[0];  // send index
+	      int si = it.get_global_id()[0] * stride;  // send index
+	      ptrdiff_t advance = threads * stride;
 	      while (si < count) {
 		buffer[si] = get_cycle_counter();
-		si += threads;
+		si += advance;
 	      }
 	    });
 	});
@@ -39,17 +195,18 @@ void writecyclecounter(const char *name, sycl::queue q, uint64_t *buffer, size_t
   printduration("writecyclecounter", e);
 }
 
-void readcyclecounter(const char *name, sycl::queue q, uint64_t *buffer, size_t count, int threads)
+void readcyclecounter(const char *name, sycl::queue q, uint64_t *buffer, size_t count, unsigned stride, int threads)
 {
   uint64_t start, end;
   auto e = q.submit([&](sycl::handler &h) {
       h.parallel_for_work_group(sycl::range(1), sycl::range(threads), [=](sycl::group<1> grp) {
 	  uint64_t start = get_cycle_counter();
 	  grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
-	      int si = it.get_global_id()[0];  // send index
+	      int si = it.get_global_id()[0] * stride;  // send index
+	      ptrdiff_t advance = threads * stride;
 	      while (si < count) {
 		volatile uint64_t v = buffer[si];
-		si += threads;
+		si += advance;
 	      }
 	    });
 	  uint64_t end = get_cycle_counter();
@@ -60,15 +217,16 @@ void readcyclecounter(const char *name, sycl::queue q, uint64_t *buffer, size_t 
   printduration(name, e);
 }
 
-void writecyclecounter_uncached(const char *name, sycl::queue q, uint64_t *buffer, size_t count, int threads)
+void writecyclecounter_uncached(const char *name, sycl::queue q, uint64_t *buffer, size_t count, unsigned stride, int threads)
 {
   auto e = q.submit([&](sycl::handler &h) {
       h.parallel_for_work_group(sycl::range(1), sycl::range(threads), [=](sycl::group<1> grp) {
 	  grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
-	      int si = it.get_global_id()[0];  // send index
+	      int si = it.get_global_id()[0] * stride;  // send index
+	      ptrdiff_t advance = threads * stride;
 	      while (si < count) {
 		ucs_ulong(&buffer[si], get_cycle_counter());
-		si += threads;
+		si += advance;
 	      }
 	    });
 	});
@@ -77,17 +235,18 @@ void writecyclecounter_uncached(const char *name, sycl::queue q, uint64_t *buffe
   printduration("writecyclecounter", e);
 }
 
-void readcyclecounter_uncached(const char *name, sycl::queue q, uint64_t *buffer, size_t count, int threads)
+void readcyclecounter_uncached(const char *name, sycl::queue q, uint64_t *buffer, size_t count, unsigned stride, int threads)
 {
   uint64_t start, end;
   auto e = q.submit([&](sycl::handler &h) {
       h.parallel_for_work_group(sycl::range(1), sycl::range(threads), [=](sycl::group<1> grp) {
 	  uint64_t start = get_cycle_counter();
 	  grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
-	      int si = it.get_global_id()[0];  // send index
+	      int si = it.get_global_id()[0] * stride;  // send index
+	      ptrdiff_t advance = threads * stride;
 	      while (si < count) {
 		volatile uint64_t v = ucl_ulong(&buffer[si]);
-		si += threads;
+		si += advance;
 	      }
 	    });
 	  uint64_t end = get_cycle_counter();
@@ -96,6 +255,52 @@ void readcyclecounter_uncached(const char *name, sycl::queue q, uint64_t *buffer
     });
   e.wait();
   printduration(name, e);
+}
+
+void printdelta(uint64_t *buffer, unsigned count, unsigned stride) {
+  uint64_t old = 0;
+  for (size_t i = 0; i < count; i += stride) {
+    uint64_t v = buffer[i];
+    printf("%8ld %ld, diff %ld\n", i, v, v-old);
+    old = v;
+  }
+}
+
+void hostwrite_uncached(const char *name, uint64_t *buffer, size_t count, unsigned stride, int threads)
+{
+  uint64_t start_time = rdtsc();
+  uint64_t offset = 0;
+#pragma omp parallel for
+  for (size_t i = 0; i < count; i += 1) {
+    uint64_t v[8];
+    v[0] = rdtsc();
+    v[1] = i;
+    _movdir64b(&buffer[offset], v);
+    offset += stride;
+  }
+  uint64_t end_time = rdtsc();
+  printdelta(buffer, count, stride);
+  printf("csv,hostwritegpu,count,threads,time\n");
+  printf("csv,hostwritegpu,%lu,%d,%ld\n", count,  omp_get_num_threads() , end_time-start_time);
+}
+
+void hostwrite(const char *name, uint64_t *buffer, size_t count, unsigned stride, int threads)
+{
+  uint64_t start_time = rdtsc();
+  uint64_t offset = 0;
+#pragma omp parallel for
+  for (size_t i = 0; i < count; i += 1) {
+    uint64_t v[8];
+    v[0] = rdtsc();
+    v[1] = i;
+    buffer[offset + 0] = v[0];
+    buffer[offset + 1] = v[1];
+    offset += stride;
+  }
+  uint64_t end_time = rdtsc();
+  printdelta(buffer, count, stride);
+  printf("csv,hostwritegpu,count,threads,time\n");
+  printf("csv,hostwritegpu,%lu,%d,%ld\n", count,  omp_get_num_threads() , end_time-start_time);
 }
 
 void pingpong(sycl::queue q, uint64_t *gr, uint64_t *gw, uint64_t *hr, uint64_t *hw, size_t count)
@@ -136,14 +341,22 @@ void pingpong(sycl::queue q, uint64_t *gr, uint64_t *gw, uint64_t *hr, uint64_t 
 }
 
 
+
 constexpr size_t BUFSIZE = 1L << 24;
 
 int main(int argc, char *argv[]) {
   std::cout << "Number of available threads: " << omp_get_num_threads() << std::endl;
-  if (argc < 2) exit(1);
+  ProcessArgs(argc, argv);
+  
+  unsigned count = g_count;
+  unsigned threads = g_threads;
+  unsigned stride = g_stride;
+
+  assert(count * stride * sizeof(uint64_t) <= BUFSIZE);
+  
   sycl::property_list prop_list{sycl::property::queue::enable_profiling()};
 
-  sycl::queue qa1 = sycl::queue(sycl::gpu_selector_v, prop_list);
+  sycl::queue qa1 = sycl::queue(sycl::gpu_selector{}, prop_list);
   
   std::cout<<"selected device : "<<qa1.get_device().get_info<sycl::info::device::name>() << std::endl;
   std::cout<<"device vendor : "<<qa1.get_device().get_info<sycl::info::device::vendor>() << std::endl;
@@ -159,194 +372,103 @@ int main(int argc, char *argv[]) {
   qa1.memset(device_buffer, 0, BUFSIZE).wait();
   memset(host_buffer, 0, BUFSIZE);
 
-  if (strcmp(argv[1], "gpureaddevice") == 0) {
-    assert(argc == 4);
-    unsigned count = atol(argv[2]);
-    assert(count < (BUFSIZE/sizeof(uint64_t)));
-    unsigned athreads = atol(argv[3]);
-    readcyclecounter("gpureaddevice", qa1, device_buffer, count, athreads);
-    printf("%s count %u cycles %ld\n", "gpureaddevice", count, host_access_device_buffer[0]);
-  }
-  if (strcmp(argv[1], "gpureadhost") == 0) {
-    assert(argc == 4);
-    unsigned count = atol(argv[2]);
-    assert(count < (BUFSIZE/sizeof(uint64_t)));
-    unsigned athreads = atol(argv[3]);
-    readcyclecounter_uncached("gpureadhost", qa1, host_buffer, count, athreads);
-    printf("%s count %u cycles %ld\n", "gpureadhost", count, host_buffer[0]);
-  }
-  if (strcmp(argv[1], "gpureaddeviceucl") == 0) {
-    assert(argc == 4);
-    unsigned count = atol(argv[2]);
-    assert(count < (BUFSIZE/sizeof(uint64_t)));
-    unsigned athreads = atol(argv[3]);
-    readcyclecounter_uncached("gpureaddeviceucl", qa1, device_buffer, count, athreads);
-    printf("%s count %u cycles %ld\n", "gpureaddeviceucl", count, host_access_device_buffer[0]);
-  }
-  if (strcmp(argv[1], "gpureadhostucl") == 0) {
-    assert(argc == 4);
-    unsigned count = atol(argv[2]);
-    assert(count < (BUFSIZE/sizeof(uint64_t)));
-    unsigned athreads = atol(argv[3]);
-    readcyclecounter("gpureadhostucl", qa1, host_buffer, count, athreads);
-    printf("%s count %u cycles %ld\n", "gpureadhostucl", count, host_buffer[0]);
-  }
-  if (strcmp(argv[1], "gpuwritedevice") == 0) {
-    assert(argc == 4);
-    unsigned count = atol(argv[2]);
-    assert(count < (BUFSIZE/sizeof(uint64_t)));
-    unsigned athreads = atol(argv[3]);
-    writecyclecounter("gpuwritedevice", qa1, device_buffer, count, athreads);
-    qa1.memcpy(host_buffer, device_buffer, count * sizeof(uint64_t)).wait();
-    uint64_t old = 0;
-    for (size_t i = 0; i < count; i += 1) {
-      uint64_t v = host_buffer[i];
-      printf("%8ld %ld, diff %ld\n", i, v, v-old);
-      old = v;
+  uint64_t *buffer, *check_buffer;
+  if (g_bufloc == loc_c) {
+    buffer = host_buffer;
+    check_buffer = host_buffer;
+  } else {
+    if (g_from == loc_c) {
+      buffer = host_access_device_buffer;
+    } else {
+      buffer = device_buffer;
     }
+    check_buffer = host_access_device_buffer;
   }
-  if (strcmp(argv[1], "gpuwritehost") == 0) {
-    assert(argc == 4);
-    unsigned count = atol(argv[2]);
-    assert(count < (BUFSIZE/sizeof(uint64_t)));
-    unsigned athreads = atol(argv[3]);
-    writecyclecounter("gpuwritehost", qa1, host_buffer, count, athreads);
-    uint64_t old = 0;
-    for (size_t i = 0; i < count; i += 1) {
-      uint64_t v = host_buffer[i];
-      printf("%8ld %ld, diff %ld\n", i, v, v-old);
-      old = v;
-    }
-  }
-  if (strcmp(argv[1], "gpuwritedeviceucs") == 0) {
-    assert(argc == 4);
-    unsigned count = atol(argv[2]);
-    assert(count < (BUFSIZE/sizeof(uint64_t)));
-    unsigned athreads = atol(argv[3]);
-    writecyclecounter_uncached("gpuwritedeviceucs", qa1, device_buffer, count, athreads);
-    qa1.memcpy(host_buffer, device_buffer, count * sizeof(uint64_t)).wait();
-    uint64_t old = 0;
-    for (size_t i = 0; i < count; i += 1) {
-      uint64_t v = host_buffer[i];
-      printf("%8ld %ld, diff %ld\n", i, v, v-old);
-      old = v;
-    }
-  }
-  if (strcmp(argv[1], "gpuwritehostucs") == 0) {
-    assert(argc == 4);
-    unsigned count = atol(argv[2]);
-    assert(count < (BUFSIZE/sizeof(uint64_t)));
-    unsigned athreads = atol(argv[3]);
-    uint64_t old = 0;
-    writecyclecounter_uncached("gpuwritehostucs", qa1, host_buffer, count, athreads);
-    for (size_t i = 0; i < count; i += 1) {
-      uint64_t v = host_buffer[i];
-      printf("%8ld %ld, diff %ld\n", i, v, v-old);
-      old = v;
-    }
-  }
-  if (strcmp(argv[1], "hostwritegpu") == 0) {
-    assert(argc == 3);
-    unsigned count = atol(argv[2]);
-    
-    assert(count < (BUFSIZE/sizeof(uint64_t)));
-    uint64_t start_time = rdtsc();
-    #pragma omp parallel for
-    for (size_t i = 0; i < count; i += 1) {
-      uint64_t v[8];
-      v[0] = rdtsc();
-      v[1] = i;
-      _movdir64b(&host_access_device_buffer[i << 3], v);
-    }
-    uint64_t end_time = rdtsc();
-    sleep(1);
-    //qa1.memcpy(host_buffer, device_buffer, count * sizeof(uint64_t)).wait();
-    //sleep(1);
-    uint64_t last = 0;
-    for (size_t i = 0; i < count; i += 1) {
-      uint64_t v = host_access_device_buffer[i<<3];
-      printf("%8ld c %ld diff %ld\n", i, v, v - last);
-      last = v;
-    }
-    printf("csv,hostwritegpu,count,threads,time\n");
-    printf("csv,hostwritegpu,%u,%d,%ld\n", count,  omp_get_num_threads() , end_time-start_time);
-  }
-  if (strcmp(argv[1], "hostwritehost") == 0) {
-    assert(argc == 3);
-    unsigned count = atol(argv[2]);
-    
-    assert(count < (BUFSIZE/sizeof(uint64_t)));
-    uint64_t start_time = rdtsc();
-    #pragma omp parallel for
-    for (size_t i = 0; i < count; i += 1) {
-      uint64_t v[8];
-      v[0] = rdtsc();
-      v[1] = i;
-      host_buffer[0+(i << 3)] = v[0];
-      host_buffer[0+(i << 3)] = v[1];
-    }
-    uint64_t end_time = rdtsc();
-    sleep(1);
-    //qa1.memcpy(host_buffer, device_buffer, count * sizeof(uint64_t)).wait();
-    //sleep(1);
-    uint64_t last = 0;
-    for (size_t i = 0; i < count; i += 1) {
-      uint64_t v = host_buffer[i<<3];
-      printf("%8ld c %ld diff %ld\n", i, v, v - last);
-      last = v;
-    }
-    printf("csv,hostwritehost,count,threads,time\n");
-    printf("csv,hostwritehost,%u,%d,%ld\n", count,  omp_get_num_threads() , end_time-start_time);
-  }
+  sycl::queue q = qa1;
 
-  if (strcmp(argv[1], "pingpong") == 0) {
-    assert(argc == 5);
-    unsigned count = atol(argv[2]);
-    assert(count < (BUFSIZE/sizeof(uint64_t)));
-    uint64_t *hr = NULL;
-    uint64_t *hw = NULL;
-    uint64_t *gr = NULL;
-    uint64_t *gw = NULL;
-    if (strcmp(argv[3], "cpu")) {
-      hw = &host_buffer[0];
-      gr = &host_buffer[0];
+  if (g_from == loc_c) {
+    switch (g_op) {
+    case op_store: {
+      hostwrite(op_str[g_op], buffer, count, stride, threads);
+      break;
     }
-    if (strcmp(argv[3], "device")) { 
-      hw = &host_access_device_buffer[0];
-      gr = &device_buffer[0];
-   }
-    if (strcmp(argv[4], "cpu")) {
-      hr = &host_buffer[8];
-      gw = &host_buffer[8];
+    case op_ucs: {
+      hostwrite_uncached(op_str[g_op], buffer, count, stride, threads);
+      break;
     }
-    if (strcmp(argv[4], "device")) {
-      hr = &host_access_device_buffer[8];
-      gw = &device_buffer[8];
+    case op_load: {
+      readcyclecounter(op_str[g_op], q, buffer, count, stride, threads);
+      printf("%s count %u cycles %ld\n", op_str[g_op], count, check_buffer[0]);
+      break;
     }
-    assert(hr != NULL);
-    assert(hw != NULL);
-    assert(gr != NULL);
-    assert(gw != NULL);
-    pingpong(qa1, gr, gw, hr, hw, count);
+    }
+  } else {
+    switch (g_op) {
+    case op_store: {
+      writecyclecounter(op_str[g_op], q, buffer, count, stride, threads);
+      printdelta(check_buffer, count, stride);
+      break;
+    }
+    case op_ucs: {
+      writecyclecounter_uncached(op_str[g_op], q, buffer, count, stride, threads);
+      printdelta(check_buffer, count, stride);
+      break;
+    }
+    case op_load: {
+      readcyclecounter(op_str[g_op], q, buffer, count, stride, threads);
+      printf("%s count %u cycles %ld\n", op_str[g_op], count, check_buffer[0]);
+      break;
+    }
+    case op_ucl: {
+      readcyclecounter_uncached(op_str[g_op], q, buffer, count, stride, threads);
+      printf("%s count %u cycles %ld\n", op_str[g_op], count, check_buffer[0]);
+      break;
+    }
+    case op_pingpong: {
+      uint64_t *hr = NULL;
+      uint64_t *hw = NULL;
+      uint64_t *gr = NULL;
+      uint64_t *gw = NULL;
+      if (strcmp(argv[3], "cpu")) {
+	hw = &host_buffer[0];
+	gr = &host_buffer[0];
+      }
+      if (strcmp(argv[3], "device")) { 
+	hw = &host_access_device_buffer[0];
+	gr = &device_buffer[0];
+      }
+      if (strcmp(argv[4], "cpu")) {
+	hr = &host_buffer[8];
+	gw = &host_buffer[8];
+      }
+      if (strcmp(argv[4], "device")) {
+	hr = &host_access_device_buffer[8];
+	gw = &device_buffer[8];
+      }
+      assert(hr != NULL);
+      assert(hw != NULL);
+      assert(gr != NULL);
+      assert(gw != NULL);
+      pingpong(q, gr, gw, hr, hw, count);
+      break;
+    }
+    }
   }
   
-  if (strcmp(argv[1], "comparetimer") == 0) {
-    assert(argc == 5);
-    unsigned gcount = atol(argv[2]);
-    unsigned ccount = atol(argv[3]);
-    unsigned athreads = atol(argv[4]);
+  
+  if (g_op == op_comparetimer) {
     sycl::event ea1;
     {
       ea1 = qa1.submit([&](sycl::handler &h) {
-	  h.parallel_for_work_group(sycl::range(1), sycl::range(athreads), [=](sycl::group<1> grp) {
+	  h.parallel_for_work_group(sycl::range(1), sycl::range(threads), [=](sycl::group<1> grp) {
 	      grp.parallel_for_work_item([&] (sycl::h_item<1> it) {
 		  int si = it.get_global_id()[0];  // send index
 		  while (device_buffer[0] == 0)
 		    sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
-		  while (si < gcount) {
+		  while (si < count) {
 		    ucs_ulong(&device_buffer[8], get_cycle_counter());
 		    sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
-		    si += athreads;
+		    si += threads;
 		  }
 		  ucs_ulong(&device_buffer[0],0);
 		});
@@ -360,7 +482,7 @@ int main(int argc, char *argv[]) {
     volatile uint64_t *value = &host_access_device_buffer[8];
     _movdir64b((void *) flag, start);
     uint64_t old = *value;
-    for (size_t i = 0; i < ccount; i += 1) {
+    for (size_t i = 0; i < count; i += 1) {
       uint64_t v = *value;
       if (v != old) {
 	uint64_t ts = rdtsc();
@@ -374,7 +496,7 @@ int main(int argc, char *argv[]) {
     printduration("timer read", ea1);
     uint64_t oldh = 0;
     uint64_t oldd = 0;
-    for (size_t i = 0; i < ccount*2; i += 1) {
+    for (size_t i = 0; i < count*2; i += 1) {
       uint64_t hv = host_buffer[0+(i*2)];
       uint64_t dv = host_buffer[1+(i*2)];
 	
