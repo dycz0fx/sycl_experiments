@@ -32,6 +32,7 @@ add_executable(builtintest builtintest.cpp)
 #add_executable(esimd_memcpy esimd_memcpy.cpp)
 add_executable(queuetest queuetest.cpp) 
 add_executable(timertest timertest.cpp) 
+add_executable(test_device_lock test_device_lock.cpp) 
 
 set(SRUN srun)
 add_test(NAME host_test COMMAND ${SRUN} ./host)
