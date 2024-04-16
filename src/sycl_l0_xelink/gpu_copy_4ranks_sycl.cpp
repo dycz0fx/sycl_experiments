@@ -67,10 +67,10 @@ int main(int argc, char **argv) {
     }
 
     assert(sizeof(int) == 4);
-    int *out_buffs[dev_count], *in_buffs[dev_count];
+    long *out_buffs[dev_count], *in_buffs[dev_count];
     for (int i=0; i<dev_count; i++) {
-        out_buffs[i] = sycl::malloc_device<int>(N,q_vec[i]);
-        in_buffs[i] = sycl::malloc_device<int>(N,q_vec[i]);
+        out_buffs[i] = sycl::malloc_device<long>(N,q_vec[i]);
+        in_buffs[i] = sycl::malloc_device<long>(N,q_vec[i]);
         q_vec[i].submit([&](sycl::handler &h) {
             h.parallel_for(N, [=](sycl::id<1> idx) {
                 in_buffs[i][idx] = 23;
@@ -79,14 +79,14 @@ int main(int argc, char **argv) {
         }).wait();
     }
 
-    int *ptr0 = in_buffs[0];
-    int *ptr1 = in_buffs[1];
-    int *ptr2 = in_buffs[2];
-    int *ptr3 = in_buffs[3];
-    int *ptr_0 = out_buffs[0];
-    int *ptr_1 = out_buffs[1];
-    int *ptr_2 = out_buffs[2];
-    int *ptr_3 = out_buffs[3];
+    long *ptr0 = in_buffs[0];
+    long *ptr1 = in_buffs[1];
+    long *ptr2 = in_buffs[2];
+    long *ptr3 = in_buffs[3];
+    long *ptr_0 = out_buffs[0];
+    long *ptr_1 = out_buffs[1];
+    long *ptr_2 = out_buffs[2];
+    long *ptr_3 = out_buffs[3];
 
     const int rep = 10;
 
@@ -106,11 +106,11 @@ int main(int argc, char **argv) {
         auto e = q_vec[0].submit([=](sycl::handler &h) {
             //h.parallel_for(N, [=](sycl::id<1> idx) {
             h.parallel_for(sycl::nd_range(sycl::range{kernel_size}, sycl::range{work_group_size}), [=](sycl::nd_item<1> it) {
-                {
                     const size_t idx = it.get_global_linear_id();
+/*
                     sycl::sub_group sg = it.get_sub_group();
                     const size_t sgSize = sg.get_local_range()[0];
-                    int base = (idx / sgSize) * sgSize * vec_size;
+                    size_t base = (idx / sgSize) * sgSize * vec_size;
 
                     if (write) {
                     auto sum = sg.load<vec_size>(get_multi_ptr(ptr0 + idx));
@@ -127,14 +127,22 @@ int main(int argc, char **argv) {
                     auto sum = sum0 + sum1 + sum2 + sum3;
                     sg.store<vec_size>(get_multi_ptr(ptr_0 + idx), sum);
                     }
+*/
 
-/*
-                    int sum = ptr0[idx];
+                if (write) {
+                    long sum = ptr0[idx];
                     ptr_0[idx] = sum;
                     ptr_1[idx] = sum;
                     ptr_2[idx] = sum;
                     ptr_3[idx] = sum;
-                    */
+                }
+                else {
+                    long v0 = ptr0[idx];
+                    long v1 = ptr1[idx];
+                    long v2 = ptr2[idx];
+                    long v3 = ptr3[idx];
+                    long sum = v0 + v1 + v2 + v3;
+                    ptr_0[idx] = sum;
                 }
             });
         });
@@ -143,11 +151,11 @@ int main(int argc, char **argv) {
         e = q_vec[1].submit([=](sycl::handler &h) {
             //h.parallel_for(N, [=](sycl::id<1> idx) {
             h.parallel_for(sycl::nd_range(sycl::range{kernel_size}, sycl::range{work_group_size}), [=](sycl::nd_item<1> it) {
-                {
                     const size_t idx = it.get_global_linear_id();
+/*
                     sycl::sub_group sg = it.get_sub_group();
                     const size_t sgSize = sg.get_local_range()[0];
-                    int base = (idx / sgSize) * sgSize * vec_size;
+                    size_t base = (idx / sgSize) * sgSize * vec_size;
 
                     if (write) {
                     auto sum = sg.load<vec_size>(get_multi_ptr(ptr1 + idx));
@@ -164,14 +172,22 @@ int main(int argc, char **argv) {
                     auto sum = sum0 + sum1 + sum2 + sum3;
                     sg.store<vec_size>(get_multi_ptr(ptr_1 + idx), sum);
                     }
+*/
 
-/*
-                    int sum = ptr1[idx];
+                if (write) {
+                    long sum = ptr1[idx];
                     ptr_0[idx] = sum;
                     ptr_1[idx] = sum;
                     ptr_2[idx] = sum;
                     ptr_3[idx] = sum;
-                    */
+                }
+                else {
+                    long v0 = ptr0[idx];
+                    long v1 = ptr1[idx];
+                    long v2 = ptr2[idx];
+                    long v3 = ptr3[idx];
+                    long sum = v0 + v1 + v2 + v3;
+                    ptr_1[idx] = sum;
                 }
             });
         });
@@ -180,11 +196,11 @@ int main(int argc, char **argv) {
         e = q_vec[2].submit([=](sycl::handler &h) {
             //h.parallel_for(N, [=](sycl::id<1> idx) {
             h.parallel_for(sycl::nd_range(sycl::range{kernel_size}, sycl::range{work_group_size}), [=](sycl::nd_item<1> it) {
-                {
                     const size_t idx = it.get_global_linear_id();
+/*
                     sycl::sub_group sg = it.get_sub_group();
                     const size_t sgSize = sg.get_local_range()[0];
-                    int base = (idx / sgSize) * sgSize * vec_size;
+                    size_t base = (idx / sgSize) * sgSize * vec_size;
 
                     if (write) {
                     auto sum = sg.load<vec_size>(get_multi_ptr(ptr2 + idx));
@@ -201,14 +217,22 @@ int main(int argc, char **argv) {
                     auto sum = sum0 + sum1 + sum2 + sum3;
                     sg.store<vec_size>(get_multi_ptr(ptr_2 + idx), sum);
                     }
+*/
 
-/*
-                    int sum = ptr2[idx];
+                if (write) {
+                    long sum = ptr2[idx];
                     ptr_0[idx] = sum;
                     ptr_1[idx] = sum;
                     ptr_2[idx] = sum;
                     ptr_3[idx] = sum;
-                    */
+                }
+                else {
+                    long v0 = ptr0[idx];
+                    long v1 = ptr1[idx];
+                    long v2 = ptr2[idx];
+                    long v3 = ptr3[idx];
+                    long sum = v0 + v1 + v2 + v3;
+                    ptr_2[idx] = sum;
                 }
             });
         });
@@ -217,11 +241,11 @@ int main(int argc, char **argv) {
         e = q_vec[3].submit([=](sycl::handler &h) {
             //h.parallel_for(N, [=](sycl::id<1> idx) {
             h.parallel_for(sycl::nd_range(sycl::range{kernel_size}, sycl::range{work_group_size}), [=](sycl::nd_item<1> it) {
-                {
                     const size_t idx = it.get_global_linear_id();
+/*
                     sycl::sub_group sg = it.get_sub_group();
                     const size_t sgSize = sg.get_local_range()[0];
-                    int base = (idx / sgSize) * sgSize * vec_size;
+                    size_t base = (idx / sgSize) * sgSize * vec_size;
 
                     if (write) {
                     auto sum = sg.load<vec_size>(get_multi_ptr(ptr3 + idx));
@@ -238,14 +262,22 @@ int main(int argc, char **argv) {
                     auto sum = sum0 + sum1 + sum2 + sum3;
                     sg.store<vec_size>(get_multi_ptr(ptr_3 + idx), sum);
                     }
+*/
 
-                /*
-                    int sum = ptr3[idx];
+                if (write) {
+                    long sum = ptr3[idx];
                     ptr_0[idx] = sum;
                     ptr_1[idx] = sum;
                     ptr_2[idx] = sum;
                     ptr_3[idx] = sum;
-                    */
+                }
+                else {
+                    long v0 = ptr0[idx];
+                    long v1 = ptr1[idx];
+                    long v2 = ptr2[idx];
+                    long v3 = ptr3[idx];
+                    long sum = v0 + v1 + v2 + v3;
+                    ptr_3[idx] = sum;
                 }
             });
         });

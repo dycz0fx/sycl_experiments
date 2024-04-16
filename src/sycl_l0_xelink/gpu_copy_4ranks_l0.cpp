@@ -174,7 +174,7 @@ public:
         zeCall(zeEventPoolCreate(context, &pool_desc, 0, nullptr, &event_pool));
         events.reserve(event_pool_size);
 
-        buffer_bytes = buffer_count * sizeof(int);
+        buffer_bytes = buffer_count * sizeof(long);
         ze_host_mem_alloc_desc_t host_alloc_desc{};
         zeCall(zeMemAllocHost(context, &host_alloc_desc, buffer_bytes * ranks.size(), 0, &host_bufs.at(rank_id)));
 
@@ -197,10 +197,10 @@ public:
     void run() {
         // init host buffer values
         for (size_t i = 0; i < buffer_count * ranks.size(); ++i) {
-            ((int*)host_bufs.at(rank_id))[i] = i;
+            ((long*)host_bufs.at(rank_id))[i] = i;
         }
         for (size_t i = 0; i < buffer_count; ++i) {
-            ((int*)result_buffer)[i] = 0;
+            ((long*)result_buffer)[i] = 0;
         }
 
         // copy from my host buffer to my device buffer

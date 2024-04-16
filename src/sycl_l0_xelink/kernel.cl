@@ -27,11 +27,11 @@ __kernel void reduce_scatter_kernel_3( \
 */
 
 __kernel void reduce_scatter_kernel_4( \
-    __global int* in_buf_0,
-    __global int* in_buf_1,
-    __global int* in_buf_2,
-    __global int* in_buf_3,
-    __global int* out_buf,
+    __global long* in_buf_0,
+    __global long* in_buf_1,
+    __global long* in_buf_2,
+    __global long* in_buf_3,
+    __global long* out_buf,
     const long count,
     const int is_write) {
     const size_t thread_id = get_global_id(0);
