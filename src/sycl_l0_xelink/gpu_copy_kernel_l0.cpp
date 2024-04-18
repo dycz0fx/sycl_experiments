@@ -30,7 +30,7 @@
 class rank_entry;
 
 size_t num_threads = 4;
-size_t buffer_count = 2097152;
+size_t buffer_count = 32 * 1024 * 1024;
 int is_write = 1;
 bool print_result_buffer = false;
 bool verbose = false;
@@ -41,7 +41,6 @@ size_t bench_iter = max_bench_iter;
 std::vector<std::thread> threads;
 std::vector<rank_entry> ranks;
 
-std::vector<void*> host_bufs;
 std::vector<void*> send_bufs;
 std::vector<void*> recv_bufs;
 
@@ -130,7 +129,7 @@ size_t get_iter_count(size_t bytes, size_t max_iter_count) {
         res = 1;
     }
 
-    return res;
+    return res * 2;
 }
 
 void print_buffer(size_t rank_id, const void* buf) {
@@ -176,16 +175,16 @@ public:
 
         buffer_bytes = buffer_count * sizeof(long);
         ze_host_mem_alloc_desc_t host_alloc_desc{};
-        zeCall(zeMemAllocHost(context, &host_alloc_desc, buffer_bytes * ranks.size(), 0, &host_bufs.at(rank_id)));
+        zeCall(zeMemAllocHost(context, &host_alloc_desc, buffer_bytes, 0, &host_send_buf));
 
         ze_device_mem_alloc_desc_t send_buf_alloc_desc{};
-        zeCall(zeMemAllocDevice(context, &send_buf_alloc_desc, buffer_bytes * ranks.size(), 0, device, &send_bufs.at(rank_id)));
+        zeCall(zeMemAllocDevice(context, &send_buf_alloc_desc, buffer_bytes, 0, device, &send_bufs.at(rank_id)));
 
         ze_device_mem_alloc_desc_t recv_buf_alloc_desc{};
         zeCall(zeMemAllocDevice(context, &recv_buf_alloc_desc, buffer_bytes * ranks.size(), 0, device, &recv_bufs.at(rank_id)));
 
         host_alloc_desc = {};
-        zeCall(zeMemAllocHost(context, &host_alloc_desc, buffer_bytes, 0, &result_buffer));
+        zeCall(zeMemAllocHost(context, &host_alloc_desc, buffer_bytes * ranks.size(), 0, &host_recv_buf));
 
         createModule();
         ze_kernel_desc_t kernel_desc{};
@@ -196,18 +195,18 @@ public:
 
     void run() {
         // init host buffer values
-        for (size_t i = 0; i < buffer_count * ranks.size(); ++i) {
-            ((long*)host_bufs.at(rank_id))[i] = i;
-        }
         for (size_t i = 0; i < buffer_count; ++i) {
-            ((long*)result_buffer)[i] = 0;
+            ((long*)host_send_buf)[i] = 23;
+        }
+        for (size_t i = 0; i < buffer_count * ranks.size(); ++i) {
+            ((long*)host_recv_buf)[i] = 24;
         }
 
         // copy from my host buffer to my device buffer
         {
-            void* src = host_bufs.at(rank_id);
+            void* src = host_send_buf;
             void* dst = send_bufs.at(rank_id);
-            zeCall(zeCommandListAppendMemoryCopy(get_local_comp_list(), dst, src, buffer_bytes * ranks.size(), nullptr, 0, nullptr));
+            zeCall(zeCommandListAppendMemoryCopy(get_local_comp_list(), dst, src, buffer_bytes, nullptr, 0, nullptr));
             zeCall(zeCommandListClose(get_local_comp_list()));
             auto list = get_local_comp_list();
             zeCall(zeCommandQueueExecuteCommandLists(comp_queue_list.first, 1, &list, nullptr));
@@ -219,11 +218,10 @@ public:
 
         zeCall(zeCommandListReset(get_local_comp_list()));
 
-        std::vector<const void*> in_bufs;
-        in_bufs.reserve(ranks.size());
+        std::vector<const void*> peer_bufs;
         for (size_t i = 0; i < ranks.size(); i++) {
-            void* src = (char*)send_bufs[i] + rank_id * buffer_bytes;
-            in_bufs.push_back(src);
+            void* ptr = is_write ? recv_bufs[i] : send_bufs[i];
+            peer_bufs.push_back(ptr);
         }
 
         uint32_t groupSizeX = 1u;
@@ -239,15 +237,17 @@ public:
         threadGroupCount.groupCountX = buffer_count / groupSizeX;
 
         zeCall(zeKernelSetGroupSize(kernel, groupSizeX, groupSizeY, groupSizeZ));
-        for (size_t i = 0; i < in_bufs.size(); i++) {
-            zeCall(zeKernelSetArgumentValue(kernel, i, sizeof(in_bufs[i]), &in_bufs[i]));
+        for (size_t i = 0; i < peer_bufs.size(); i++) {
+            zeCall(zeKernelSetArgumentValue(kernel, i, sizeof(peer_bufs[i]), &peer_bufs[i]));
         }
-        void* out_buf = recv_bufs.at(rank_id);
-        zeCall(zeKernelSetArgumentValue(kernel, in_bufs.size(), sizeof(out_buf), &out_buf));
+        void* local_buf = is_write ? send_bufs.at(rank_id) : recv_bufs.at(rank_id);
+        zeCall(zeKernelSetArgumentValue(kernel, peer_bufs.size(), sizeof(local_buf), &local_buf));
 
-        zeCall(zeKernelSetArgumentValue(kernel, in_bufs.size()+1, sizeof(buffer_count), &buffer_count));
+        zeCall(zeKernelSetArgumentValue(kernel, peer_bufs.size()+1, sizeof(buffer_count), &buffer_count));
 
-        zeCall(zeKernelSetArgumentValue(kernel, in_bufs.size()+2, sizeof(is_write), &is_write));
+        zeCall(zeKernelSetArgumentValue(kernel, peer_bufs.size()+2, sizeof(is_write), &is_write));
+
+        zeCall(zeKernelSetArgumentValue(kernel, peer_bufs.size()+3, sizeof(rank_id), &rank_id));
 
         auto kernel_event = create_event();
         zeCall(zeCommandListAppendLaunchKernel(get_local_comp_list(), kernel, &threadGroupCount, kernel_event,
@@ -287,18 +287,18 @@ public:
 
         // copy from my recv buffer to my result buffer
         void* src = recv_bufs.at(rank_id);
-        void* dst = result_buffer;
+        void* dst = host_recv_buf;
         zeCall(zeCommandListReset(get_local_comp_list()));
-        zeCall(zeCommandListAppendMemoryCopy(get_local_comp_list(), dst, src, buffer_bytes, nullptr, 0, nullptr));
+        zeCall(zeCommandListAppendMemoryCopy(get_local_comp_list(), dst, src, buffer_bytes * ranks.size(), nullptr, 0, nullptr));
         zeCall(zeCommandListClose(get_local_comp_list()));
         auto list = get_local_comp_list();
         zeCall(zeCommandQueueExecuteCommandLists(comp_queue_list.first, 1, &list, nullptr));
         zeCall(zeCommandQueueSynchronize(comp_queue_list.first, std::numeric_limits<uint64_t>::max()));
 
         if (print_result_buffer) {
-            print_buffer(rank_id, result_buffer);
+            print_buffer(rank_id, host_recv_buf);
         }
-        //validate_buffer();
+        validate_buffer();
     }
 
     void finalize() {
@@ -315,11 +315,11 @@ public:
             zeCall(zeCommandQueueDestroy(queue));
             zeCall(zeCommandListDestroy(list));
         }
-        if (result_buffer) {
-            zeCall(zeMemFree(context, result_buffer));
+        if (host_recv_buf) {
+            zeCall(zeMemFree(context, host_recv_buf));
         }
-        if (host_bufs.at(rank_id)) {
-            zeCall(zeMemFree(context, host_bufs.at(rank_id)));
+        if (host_send_buf) {
+            zeCall(zeMemFree(context, host_send_buf));
         }
         zeCall(zeContextDestroy(context));
     }
@@ -334,7 +334,7 @@ private:
     uint32_t event_pool_size = 100;
     std::vector<ze_event_handle_t> events;
     size_t buffer_bytes;
-    void* result_buffer;
+    void *host_send_buf, *host_recv_buf;
     uint32_t comp_ordinal = 100;
     uint32_t copy_ordinal = 100;
     ze_queue_properties_t queue_props;
@@ -475,7 +475,7 @@ private:
         long double stddev = std::sqrt(sum / ranks.size()) / total_avg_time * 100;
 
         printf("%zu,%zu,%zu,%Lf,%Lf\n",
-            ranks.size(), bench_iter, buffer_count * sizeof(int), total_avg_time, stddev);
+            ranks.size(), bench_iter, buffer_count * sizeof(long), total_avg_time, stddev);
     }
 
     uint64_t adjust_device_timestamp(uint64_t timestamp, const ze_device_properties_t& props) {
@@ -525,15 +525,12 @@ private:
     void validate_buffer() {
         bool is_ok = true;
         for (size_t buf_pos = 0; buf_pos < buffer_count; ++buf_pos) {
-            int sum = 0;
-            for (const void* buffer : host_bufs) {
-                sum += ((const int*)buffer)[rank_id * buffer_count + buf_pos];
-            }
-            int value = ((int*)result_buffer)[buf_pos];
-            if (sum != value) {
+            int exp = 23;
+            int value = ((long*)host_recv_buf)[buf_pos];
+            if (exp != value) {
                 is_ok = false;
                 printf("ERROR: unexpected value: rank %zu, buf_pos %zu, value %d, expected %d\n",
-                    rank_id, buf_pos, value, sum);
+                    rank_id, buf_pos, value, exp);
                 break;
             }
         }
@@ -563,16 +560,20 @@ void thread_entry(size_t thread_id) {
 
 int main(int argc, char *argv[]) {
     if (argc > 1) {
-        num_threads = atoi(argv[1]);
-        buffer_count = atoi(argv[2]);
-        if (argc > 3) {
-            is_write = atoi(argv[3]);
-        }
-        bench_iter = get_iter_count(buffer_count * sizeof(int), max_bench_iter);
-        if (verbose) {
-            printf("buffer count %zu , is_write %d\n", buffer_count, is_write);
-        }
+        buffer_count = atoi(argv[1]);
     }
+    if (argc > 2) {
+        is_write = atoi(argv[2]);
+    }
+    if (argc > 3) {
+        num_threads = atoi(argv[3]);
+    }
+
+    bench_iter = get_iter_count(buffer_count * sizeof(long), max_bench_iter);
+    if (verbose) {
+        printf("buffer count %zu , is_write %d\n", buffer_count, is_write);
+    }
+
     zeInit(ZE_INIT_FLAG_GPU_ONLY);
 
     if (verbose) {
@@ -592,7 +593,6 @@ int main(int argc, char *argv[]) {
     }
 
     ranks.resize(num_threads);
-    host_bufs.resize(num_threads, nullptr);
     send_bufs.resize(num_threads, nullptr);
     recv_bufs.resize(num_threads, nullptr);
     total_timers.resize(num_threads);
