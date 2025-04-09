@@ -142,7 +142,7 @@ int main(int argc, char **argv) {
 
     long* host_buff = sycl::malloc_host<long>(N * num_devices, q_vec[0]);
     for (int j=0; j<num_devices; j++) {
-        q_vec[0].memcpy(host_buff, out_buffs[j], N * num_devices * sizeof(long)).wait();
+        q_vec[j].memcpy(host_buff, out_buffs[j], N * num_devices * sizeof(long)).wait();
         for(long i=0; i < N * num_devices; i++) {
             if(host_buff[i] != 23) {
                 std::cout<<"Error on device : " << j <<" at index : "<<i<<" with value : "<<host_buff[i]<<std::endl;
