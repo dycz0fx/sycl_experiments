@@ -136,13 +136,14 @@ int main(int argc, char **argv) {
     }
 
     auto end = std::chrono::high_resolution_clock::now();
-
-    std::cout << "size : "<<sizeof(long) * N;
-    std::cout << "  time : " << std::chrono::duration_cast<std::chrono::microseconds>(end-start).count()/rep<< " µs\n";
+    auto avg_time = std::chrono::duration_cast<std::chrono::microseconds>(end-start).count()/rep;
+    std::cout << "size : "<< sizeof(long) * N;
+    std::cout << "  time : " << avg_time << " µs";
+    std::cout << " bw : " << sizeof(long) * N / avg_time << " MBPS" << std::endl;
 
     long* host_buff = sycl::malloc_host<long>(N * num_devices, q_vec[0]);
     for (int j=0; j<num_devices; j++) {
-        q_vec[0].memcpy(host_buff, out_buffs[j], N * num_devices * sizeof(long)).wait();
+        q_vec[j].memcpy(host_buff, out_buffs[j], N * num_devices * sizeof(long)).wait();
         for(long i=0; i < N * num_devices; i++) {
             if(host_buff[i] != 23) {
                 std::cout<<"Error on device : " << j <<" at index : "<<i<<" with value : "<<host_buff[i]<<std::endl;
